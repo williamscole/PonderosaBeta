@@ -550,6 +550,89 @@ class PedSims:
     def get_items(self):
         return self.famG, self.ibd, self.root_nodes
 
+class PedigreeNetwork:
+    
+    def __init__(self, fam):
+
+        if type(fam) == str:
+            fam = pd.read_csv(fam, delim_whitespace=True, header=None)
+
+        fam.columns = ["FID", "IID", "Father", "Mother", "Sex", "Pheno"]
+
+        self.pedigree = nx.DiGraph()
+        self.pedigree.add_nodes_from([[row["IID"], dict(sex=row["Sex"])] for _, row in fam.iterrows()])
+        self.pedigree.add_edges_from([list(i) + [dict(dir="down")] for i in fam[fam.Father != "0"][["Father", "IID"]].values])
+        self.pedigree.add_edges_from([list(i) + [dict(dir="down")] for i in fam[fam.Mother != "0"][["Mother", "IID"]].values])
+        self.pedigree.add_edges_from([list(i) + [dict(dir="up")] for i in fam[fam.Father != "0"][["IID", "Father"]].values])
+        self.pedigree.add_edges_from([list(i) + [dict(dir="up")] for i in fam[fam.Mother != "0"][["IID", "Mother"]].values])
+
+        self.rel_code = {('up', 'up'): 'GP',
+                        ('up', 'up', 'up'): 'GGP',
+                        ('up', 'up', 'up', 'up'): 'GGGP',
+                        ('up', 'up', 'up', 'up', 'up'): 'GGGGP',
+                        ('up', 'up', 'down'): 'AV',
+                        ('up', 'up', 'down', 'down'): 'CO',
+                        ('up', 'down'): 'sib',
+                        ('up',): 'PO'}
+
+    def annotate_path(self, path):
+        down = False
+        anno_path = []
+        for index in range(len(path)-1):
+            d = self.pedigree.get_edge_data(path[index], path[index+1])["dir"]
+            down = down or d == "down"
+            if down and d == "up":
+                return []
+            anno_path.append(d)
+        return anno_path
+
+    def find_relationship(self, id1, id2):
+        def legit_path(dir_path):
+            down = False
+            for d in dir_path:
+                down = down or d == "down"
+                if down and "up":
+                    return False
+            return True
+        
+        def reverse_path(id1, id2, path, path_dir):
+            # id1 is the genetically older individual
+            if path_dir.count("down") > path_dir.count("up"):
+                path_dir = [{"down": "up", "up": "down"}[i] for i in path_dir[::-1]]
+                path = path[::-1]
+                id1, id2 = id2, id1
+            return id1, id2, path, path_dir
+
+        paths = list(nx.all_simple_paths(self.edigree, source = id1, target = id2, cutoff = 5))
+        for index, path in enumerate(paths):
+            path_dir = [self.pedigree.get_edge_data(path[index], path[index+1])["dir"] for index in range(len(path)-1)]
+            id1_temp, id2_temp, path, path_dir = reverse_path(id1, id2, path, path_dir)
+            paths[index] = [id1_temp, id2_temp, self.pedigree.nodes[path[1]]["sex"], path_dir]
+        k = {"0": 0, "1": 0}
+        out_paths = []
+        for id1, id2, sex, path_dir in paths:
+            if legit_path(path_dir):
+                propIBD = 0.5**len(path_dir)
+                k[sex] += propIBD
+                out_paths.append([id1, id2, sex, self.rel_code.get(tuple(path_dir), "Other"), propIBD])
+        ibd1 = k["0"]*(1-k["1"]) + (1-k["0"])*k["1"]
+        ibd2 = k["0"] * k["1"]
+        probIBD = k["0"] + k["1"]
+        return [ibd1, ibd2, propIBD, out_paths]
+
+    def get_paths(self):
+        paths = dict(nx.all_pairs_shortest_path(self.pedigree, 5))
+
+        rels = []
+        for id1 in paths:
+            for id2 in paths[id1]:
+                if id1 >= id2:
+                    continue
+                relationships = self.find_relationship(id1, id2)
+                rels.append(relationships)
+
+
+
 
 class Karyogram:
     def __init__(self, map_file, cm = True):
