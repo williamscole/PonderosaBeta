@@ -191,7 +191,7 @@ class PedSims:
         out.close()
 
         # run phasedibd
-        hap = ibd.VcfHaplotypeAlignment("temp.vcf")
+        hap = ibd.VcfHaplotypeAlignment("temp.vcf", map_file)
         tpbwt = ibd.TPBWTAnalysis()
         ibd_results = tpbwt.compute_ibd(hap, use_phase_correction=False)
 
@@ -307,10 +307,10 @@ class PedSims:
             regions = updated_regions
         return regions
 
-    def pair_segments(self, id1, id2, pair_df):
+    def pair_segments(self, id1, id2, pair_df, max_gap = 1):
         pair_data = type('pair_data', (object,), {"n_segs": 0, "tot_cov": 0, "tot_all": 0, "hap": {id1: 0, id2: 0}})
         for chrom, chrom_df in pair_df.groupby("chromosome"):
-            regions = self.segment_stitcher(chrom_df[["start_cm", "end_cm"]].values)
+            regions = self.segment_stitcher(chrom_df[["start_cm", "end_cm"]].values, max_gap)
             pair_data.n_segs += len(regions)
             pair_data.tot_cov += sum([stop - start for start, stop in regions])
             pair_data.tot_all += chrom_df["l"].sum()
@@ -555,7 +555,7 @@ class PedigreeNetwork:
     def __init__(self, fam):
 
         if type(fam) == str:
-            fam = pd.read_csv(fam, delim_whitespace=True, header=None)
+            fam = pd.read_csv(fam, delim_whitespace=True, header=None, dtype = str)
 
         fam.columns = ["FID", "IID", "Father", "Mother", "Sex", "Pheno"]
 
@@ -575,23 +575,12 @@ class PedigreeNetwork:
                         ('up', 'down'): 'sib',
                         ('up',): 'PO'}
 
-    def annotate_path(self, path):
-        down = False
-        anno_path = []
-        for index in range(len(path)-1):
-            d = self.pedigree.get_edge_data(path[index], path[index+1])["dir"]
-            down = down or d == "down"
-            if down and d == "up":
-                return []
-            anno_path.append(d)
-        return anno_path
-
     def find_relationship(self, id1, id2):
         def legit_path(dir_path):
             down = False
             for d in dir_path:
                 down = down or d == "down"
-                if down and "up":
+                if down and d == "up":
                     return False
             return True
         
@@ -603,21 +592,21 @@ class PedigreeNetwork:
                 id1, id2 = id2, id1
             return id1, id2, path, path_dir
 
-        paths = list(nx.all_simple_paths(self.edigree, source = id1, target = id2, cutoff = 5))
+        paths = list(nx.all_simple_paths(self.pedigree, source = id1, target = id2, cutoff = 5))
         for index, path in enumerate(paths):
             path_dir = [self.pedigree.get_edge_data(path[index], path[index+1])["dir"] for index in range(len(path)-1)]
             id1_temp, id2_temp, path, path_dir = reverse_path(id1, id2, path, path_dir)
             paths[index] = [id1_temp, id2_temp, self.pedigree.nodes[path[1]]["sex"], path_dir]
-        k = {"0": 0, "1": 0}
+        k = {"1": 0, "2": 0}
         out_paths = []
         for id1, id2, sex, path_dir in paths:
             if legit_path(path_dir):
                 propIBD = 0.5**len(path_dir)
                 k[sex] += propIBD
                 out_paths.append([id1, id2, sex, self.rel_code.get(tuple(path_dir), "Other"), propIBD])
-        ibd1 = k["0"]*(1-k["1"]) + (1-k["0"])*k["1"]
-        ibd2 = k["0"] * k["1"]
-        probIBD = k["0"] + k["1"]
+        ibd1 = k["1"]*(1-k["2"]) + (1-k["1"])*k["2"]
+        ibd2 = k["1"] * k["2"]
+        propIBD = k["1"] + k["2"]
         return [ibd1, ibd2, propIBD, out_paths]
 
     def get_paths(self):
