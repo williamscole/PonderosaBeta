@@ -4,7 +4,7 @@ import pandas as pd
 import itertools as it
 import numpy as np
 from datetime import datetime
-# import phasedibd as ibd
+import phasedibd as ibd
 import os
 from collections import Counter
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
@@ -13,7 +13,190 @@ import matplotlib.patches as patches
 import matplotlib.pyplot as plt
 import seaborn as sns
 import pickle
+import sys
+import concurrent.futures
 
+
+def split_regions(region_dict, new_region):
+    # returns the overlap of 2 regions (<= 0 if no overlap)
+    def overlap(region1, region2):
+        start1, end1 = region1
+        start2, end2 = region2
+        return min(end1,end2) - max(start1,start2)
+    # out region will be returned; is a dict of regions mapping to members of region    
+    out_region = dict()
+    # overlapped keeps track of all the regions that overlap with the new region
+    overlapped = {tuple(new_region[:2]):[new_region[2]]}
+    # iterate through the existing regions
+    for region in sorted(region_dict):
+        # if overlap
+        if overlap(region, new_region[:2]) > 0:
+            # the regions completely overlap, just add the member and return region dict
+            if tuple(region) == tuple(new_region[:2]):
+                region_dict[region] += [new_region[2]]
+                return region_dict
+            # bc the region overlaps, add it to overlapped
+            overlapped[region] = region_dict[region]
+        # no overlap, but add the region to the out_region dict
+        else:
+            out_region[region] = region_dict[region]
+    # all the segments in overlapped overlap, so each consecutive pairs of coordinates in sites should/could have different members
+    sites = sorted(set(it.chain(*overlapped)))
+    # iterate thru consecutive sites
+    for start, stop in zip(sites, sites[1:]):
+        # get the members of the regions that overlap the consecutive sites
+        info = [j for i, j in overlapped.items() if overlap((start, stop), i) > 0]
+        # unpack the membership
+        out_region[(start,stop)] = sorted(it.chain(*info))
+    return out_region
+
+# perform various computations on ibd segments
+class ProcessSegments:
+    def __init__(self, pair_df):
+        self.segs = pair_df
+
+    def split_regions(self, region_dict, new_region):
+        # returns the overlap of 2 regions (<= 0 if no overlap)
+        def overlap(region1, region2):
+            start1, end1 = region1
+            start2, end2 = region2
+            return min(end1,end2) - max(start1,start2)
+        # out region will be returned; is a dict of regions mapping to members of region    
+        out_region = dict()
+        # overlapped keeps track of all the regions that overlap with the new region
+        overlapped = {tuple(new_region[:2]):[new_region[2]]}
+        # iterate through the existing regions
+        for region in sorted(region_dict):
+            # if overlap
+            if overlap(region, new_region[:2]) > 0:
+                # the regions completely overlap, just add the member and return region dict
+                if tuple(region) == tuple(new_region[:2]):
+                    region_dict[region] += [new_region[2]]
+                    return region_dict
+                # bc the region overlaps, add it to overlapped
+                overlapped[region] = region_dict[region]
+            # no overlap, but add the region to the out_region dict
+            else:
+                out_region[region] = region_dict[region]
+        # all the segments in overlapped overlap, so each consecutive pairs of coordinates in sites should/could have different members
+        sites = sorted(set(it.chain(*overlapped)))
+        # iterate thru consecutive sites
+        for start, stop in zip(sites, sites[1:]):
+            # get the members of the regions that overlap the consecutive sites
+            info = [j for i, j in overlapped.items() if overlap((start, stop), i) > 0]
+            # unpack the membership
+            out_region[(start,stop)] = sorted(it.chain(*info))
+        return out_region
+
+    # stitches together segments that are at most max_gap apart
+    def segment_stitcher(self, segment_list, max_gap = 1):
+        regions = {}
+        for start, stop in segment_list:
+            overlapped = {start, stop}
+            updated_regions = set()
+            for r1, r2 in regions:
+                if min(stop, r2) - max(start, r1) > -max_gap:
+                    overlapped |= {r1, r2}
+                else:
+                    updated_regions |= {(r1, r2)}
+            updated_regions |= {(min(overlapped), max(overlapped))}
+            regions = updated_regions
+        return regions
+
+    # returns ibd1, ibd2 values for the pair
+    def get_ibd1_ibd2(self):
+        ibd1, ibd2 = 0, 0
+        for chrom, chrom_df in self.segs.groupby("chromosome"):
+            r = {}
+            for _, row in chrom_df.iterrows():
+                r = split_regions(r, [row["start_cm"], row["end_cm"], row["id1_haplotype"]])
+                r = split_regions(r, [row["start_cm"], row["end_cm"], row["id2_haplotype"]+2])
+            for (start, end), hap in r.items():
+                l = end - start
+                if 0 in hap and 1 in hap and 2 in hap and 3 in hap:
+                    ibd2 += l
+                else:
+                    ibd1 += l
+        return ibd1, ibd2
+
+    # returns the number of IBD segments
+    def get_n_segments(self):
+        n = 0
+        for _, chrom_df in self.segs.groupby("chromosome"):
+            n += len(self.segment_stitcher(chrom_df[["start_cm", "end_cm"]].values))
+        return n
+
+    # returns the haplotype score of the pair
+    def get_h_score(self):
+        hap, tot = {0:0, 1:0}, 0
+        for _, chrom_df in self.segs.groupby("chromosome"):
+            r= {}
+            for _, row in chrom_df.iterrows():
+                r = self.split_regions(r, [row["start_cm"], row["end_cm"], row["id1_haplotype"]])
+                r = self.split_regions(r, [row["start_cm"], row["end_cm"], row["id2_haplotype"]+2])
+            temp = {0:0, 1:0, 2:0, 3:0}
+            for (start, end), hapl in r.items():
+                if len(hapl) > 2:
+                    continue
+                l = end - start
+                tot += l
+                for h in hapl:
+                    temp[h] += l
+            hap[0] += max(temp[0], temp[1])
+            hap[1] += max(temp[2], temp[3])
+        return hap[0]/tot, hap[1]/tot
+
+    def run_ponderosa(self):
+        class ponderosa: pass
+        ponderosa = ponderosa()
+        ibd1, ibd2 = self.get_ibd1_ibd2()
+        ponderosa.ibd1 = ibd1
+        ponderosa.ibd2 = ibd2
+        ponderosa.n = self.get_n_segments()
+        h1, h2 = self.get_h_score()
+        ponderosa.h1 = h1
+        ponderosa.h2 = h2
+        return ponderosa
+
+
+
+# takes as input a map_file (either all chrom together or separate) and a vcf file
+def interpolate_map(map_file, vcf_file):
+    # take all the sites from the vcf
+    vcf_pos = []
+    with open(vcf_file) as vcf:
+        for line in vcf:
+            if "#" in line:
+                continue
+            chrom, pos, rsid = line.split()[:3]
+            vcf_pos.append([int(chrom), int(pos), rsid])
+
+    # create dataframe from the vcf sites
+    out_map = pd.DataFrame(vcf_pos, columns=["CHROM", "MB", "rsID"])
+
+    # we have multiple map files
+    if "chr1" in map_file:
+        # create dict where chrom maps to its map_df
+        chrom_map = {chrom: pd.read_csv(map_file.replace("chr1", f"chr{chrom}"), delim_whitespace=True, names=["CHROM", "rsID", "cM", "MB"]) for chrom in range(1,23)}
+    # only one map file with all chrom
+    else:
+        # load the map file
+        map_df = pd.read_csv(map_file, delim_whitespace=True, names=["CHROM", "rsID", "cM", "MB"])
+        # subset into dict mapping to its df
+        chrom_map = {chrom: chrom_df for chrom, chrom_df in map_df.groupby("chrom")}
+    
+    # iterate through the chromosomes of the vcf file
+    for chrom, chrom_df in out_map.groupby("CHROM"):
+        # load the map reference to interpolate chrom
+        map_df = chrom_map[chrom]
+        # linear interpolation of sites
+        chrom_df["cM"] = np.interp(chrom_df["MB"], map_df["MB"], map_df["cM"])
+        # convert df to str and reorder
+        chrom_df = chrom_df[["CHROM", "rsID", "cM", "MB"]].astype(str)
+        # write out the map files individually
+        out = open(f"sim_chr{chrom}.map", "w")
+        _ = out.write("\n".join(chrom_df.apply(lambda x: "\t".join(x), axis=1).values.tolist()) + "\n")
+        
 class RemoveRelateds:
 
     def __init__(self):
@@ -104,7 +287,6 @@ class RemoveRelateds:
 
         # only run it max_iter times
         for i in range(max_iter):
-            print(f"Running iteration {i+1}")
 
             # choose and set new seed
             seed = np.random.choice(np.arange(20000))
@@ -121,6 +303,8 @@ class RemoveRelateds:
             if len(run.unrelateds) >= target:
                 print(f"Target of {target} relatives found")
                 break
+
+            print(f"Running iteration {i+1}...found a set of {len(run.unrelateds)}")
 
         # sort by length and get run with longest unrelateds list
         run_list.sort(key = lambda x: len(x.unrelateds), reverse = True)
@@ -148,23 +332,26 @@ class RemoveRelateds:
         out.write("\n".join(run.unrelateds) + "\n")
         out.close()
 
+    def plink_unrelateds(self, king_file: str, max_k: float):
+
+        # create the relatedness network from the king file
+        G = self.king_graph(king_file, lambda propIBD, a, IBD2Seg, c: propIBD > 0.1 or IBD2Seg > 0.03)
+
+        # run 10 iterations to find the largest set
+        run = self.multiple_runs(G, target = np.inf, max_iter = 10)
+
+        # write out the file
+        outfile = open("sim_keep.txt", "w")
+        _ = outfile.write("\n".join(run.unrelateds))
+        
+        print(f"Wrote out {len(run.unrelateds)} IDs to keep to 'sim_keep.txt'")
+
 class PedSims:
 
     # takes as input the path where the all sim data is
     def __init__(self, path):
         self.path = path
         self.ibd = pd.DataFrame()
-        self.couples = [('hs1_g1-b1-i1', 'hs1_g1-b1-s1'),
-                        ('hs1_g1-b1-i1', 'hs1_g1-b1-s2'),
-                        ('avuncular1_g1-b1-i1', 'avuncular1_g1-b1-s1'),
-                        ('avuncular1_g2-b1-i1', 'avuncular1_g2-b1-s1'),
-                        ('grandparent1_g1-b1-i1', 'grandparent1_g1-b1-s1'),
-                        ('grandparent1_g2-b1-i1', 'grandparent1_g2-b1-s1')]
-        self.inlaws = [('hs1_g1-b1-s1', 'hs1_g1-b1-s2'),
-                        ('avuncular1_g1-b1-i1', 'avuncular1_g2-b1-s1'),
-                        ('avuncular1_g1-b1-s1', 'avuncular1_g2-b1-s1'),
-                        ('grandparent1_g1-b1-i1', 'grandparent1_g2-b1-s1'),
-                        ('grandparent1_g1-b1-s1', 'grandparent1_g2-b1-s1')]
         self.log = "simulated_pedigrees.log"
         out = open(self.log, "w")
         _ = out.write(f"Pedigree simulations with ped-sim\n{datetime.now().strftime('%m/%d/%Y, %H:%M:%S')}\n\n")
@@ -173,11 +360,9 @@ class PedSims:
     def write_log(self, msg):
         out = open(self.log, "a")
         _ = out.write(msg)
-        out.close()  
+        out.close()          
 
-    # runs phasedibd on the vcf file
-    def run_ibd(self, header, gtdata, map_file):
-
+    def run_ibd_iteration(self, map_file, rel, iter, chrom):
         # converts indices to the actual iid
         def return_ids(vcff):
             with open(vcff) as vcf:
@@ -185,51 +370,66 @@ class PedSims:
                         if "#CHROM" in lines:
                             return lines.split()[9:]
 
-        # run write vcf
-        out = open("temp.vcf", "w")
-        out.write("".join(header + gtdata))
-        out.close()
+        # dict that stores the IDs for each relationship type
+        relative_ids = {"av": {"AV": ("g2-b2-i1", "g3-b1-i1"),
+                                "FS": ("g2-b1-i1", "g2-b2-i1"),
+                                "CO": ("g3-b1-i1", "g3-b2-i1"),
+                                "CORM": ("g3-b2-i1", "g4-b1-i1")},
+                        "mhs": {"MHS": ("g2-b1-i1", "g2-b2-i1"),
+                                "HCO": ("g3-b1-i1" , "g3-b2-i1"),
+                                "HAV1": ("g2-b1-i1", "g3-b2-i1"),
+                                "HAV2": ("g2-b2-i1", "g3-b1-i1")},
+                        "phs": {"PHS": ("g2-b1-i1", "g2-b2-i1"),
+                                "HCO": ("g3-b1-i1" , "g3-b2-i1"),
+                                "HAV1": ("g2-b1-i1", "g3-b2-i1"),
+                                "HAV2": ("g2-b2-i1", "g3-b1-i1")},
+                        "mgp": {"MGP": ("g1-b1-i1", "g3-b1-i1"),
+                                "GGP": ("g1-b1-s1", "g4-b1-i1")},
+                        "pgp": {"PGP": ("g1-b1-i1", "g3-b1-i1"),
+                                "GGP": ("g1-b1-s1", "g4-b1-i1")}}
 
-        # run phasedibd
-        hap = ibd.VcfHaplotypeAlignment("temp.vcf", map_file)
+        def rename_id(cur_id, rel_name, index):
+            cur_id = cur_id.split("_")[0]
+            sim_iter = int("".join([i for i in cur_id if i.isnumeric()]))
+            return f"i{iter}{rel_name}{sim_iter}_{index}"
+
+        # hap = ibd.VcfHaplotypeAlignment(f"sim_chr{chrom}.vcf", map_file.replace("chr1", f"chr{chrom}"))
+        hap = ibd.VcfHaplotypeAlignment(f"sim_chr{chrom}.vcf", map_file.replace("chr1", f"chr{chrom}"))
         tpbwt = ibd.TPBWTAnalysis()
         ibd_results = tpbwt.compute_ibd(hap, use_phase_correction=False)
 
         # convert the index IDs to their actual IDs
-        convert = {index:i.split()[0] for index,i in enumerate(return_ids("temp.vcf"))}
+        convert = {index:i.split()[0] for index,i in enumerate(return_ids(f"sim_chr{chrom}.vcf"))}
         ibd_results["id1"] = ibd_results.apply(lambda x: convert[x.id1],axis=1)
         ibd_results["id2"] = ibd_results.apply(lambda x: convert[x.id2],axis=1)
 
-        # get the len of segments
-        ibd_results["l"] = ibd_results["end_cm"] - ibd_results["start_cm"]
-        
-        # store ibd segments
-        self.ibd = pd.concat([self.ibd, ibd_results]).reset_index(drop = True)
+        # extract the relative segments
+        relative_segs = pd.DataFrame()
 
-        # delete the temp vcf
-        os.remove("temp.vcf")
+        for relative, (id1, id2) in relative_ids[rel].items():
+            df = ibd_results[ibd_results.apply(lambda x: id1 in x.id1 and id2 in x.id2 and x.id1.split("_")[0] == x.id2.split("_")[0], axis = 1)].copy()
+            df["id1"] = df["id1"].apply(lambda x: rename_id(x, relative, 1))
+            df["id2"] = df["id1"].apply(lambda x: rename_id(x, relative, 2))
+            df["relative"] = relative
+            relative_segs = pd.concat([relative_segs, df.drop(["start", "end"], axis=1)])
 
-    # adds the hs, av, gp.vcf
-    def add_ibd(self, map_file):
+        return relative_segs
 
-        # iterate through the three relatives
-        for rel in ["hs", "avuncular", "grandparent"]:
-
-            # split vcf by chromosome
-            vcf_dict = {str(i): [] for i in list(range(1, 23)) + ["#"]}
-            with open(f"{self.path}{rel}.vcf") as vcf_file:
-                for line in vcf_file:
-                    if "#" in line:
-                        vcf_dict["#"].append(line)
-                    else:
-                        vcf_dict[line.split()[0]].append(line)
-            
-            # run phasedibd for each chromosome
-            for chrom in range(1, 23):
-                self.run_ibd(vcf_dict["#"], vcf_dict[str(chrom)], None)
-
-        # write out the ibd segments
-        self.ibd.reset_index(drop = True).to_feather("simulated_segments.f")
+    # takes as input a pair's segments and returns IBD1 and IBD2 cM
+    def ibd1_ibd2(self, seg_df):
+        ibd1, ibd2 = 0, 0
+        for chrom, chrom_df in seg_df.groupby("chromosome"):
+            r = {}
+            for _, row in chrom_df.iterrows():
+                r = split_regions(r, [row["start_cm"], row["end_cm"], row["id1_haplotype"]])
+                r = split_regions(r, [row["start_cm"], row["end_cm"], row["id2_haplotype"]+2])
+            for (start, end), hap in r.items():
+                l = end - start
+                if 0 in hap and 1 in hap and 2 in hap and 3 in hap:
+                    ibd2 += l
+                else:
+                    ibd1 += l
+        return ibd1, ibd2
     
     def load_ibd(self):
         # load ibd segments
@@ -240,58 +440,14 @@ class PedSims:
 
         # add eches to ibd graph
         for (id1, id2), pair_df in ibd.groupby(["id1", "id2"]):
-            ibdG.add_edge(id1, id2, ibd = pair_df)
+            ibd1, ibd2 = self.ibd1_ibd2(pair_df)
+            rel = pair_df["relative"].values[0]
+            ibdG.add_edge(id1, id2, ibd = pair_df, ibd1 = ibd1, ibd2 = ibd2, rel = rel)
 
         # store the graph
         self.ibd = ibdG
 
-    def add_fam(self):
-
-        # keep track of the piars
-        pairs = {"PHS": [], "MHS": [], "MGP": [], "PGP": []}
-        founder_dict = {}
-
-        # initialize fam graph
-        famG = nx.DiGraph()
-        root_nodes = []
-
-        for rel in ["hs", "avuncular", "grandparent"]:
-
-            # get the fam file
-            fam_df = pd.read_csv(f"{self.path}{rel}-everyone.fam", delim_whitespace = True, header = None)
-
-            # compute the number of simulations
-            n_iter = int("".join([i for i in fam_df[0].values[-1] if i.isnumeric()]))
-
-            for iter in range(1, n_iter + 1):
-
-                if rel == "hs":
-                    # find the sex of the shared parents
-                    rship = "PHS" if (fam_df[fam_df[1] == f"hs{iter}_g1-b1-i1"].squeeze()[4] == 1) else "MHS"
-                    id1, id2 = f"hs{iter}_g2-b1-i1", f"hs{iter}_g2-b2-i1"
-
-                elif rel == "grandparent":
-                    # find the sex of the linking parent
-                    rship = "PGP" if (fam_df[fam_df[1] == f"grandparent{iter}_g2-b1-i1"].squeeze()[4] == 1) else "MGP"
-                    id1, id2 = f"grandparent{iter}_g1-b1-i1", f"grandparent{iter}_g3-b1-i1"
-
-                elif rel == "avuncular":
-                    rship = "AV"
-                    id1, id2 = f"avuncular{iter}_g2-b2-i1", f"avuncular{iter}_g3-b1-i1"
-
-                famG.add_node((id1, id2), id1 = id1, id2 = id2, rel = rship)
-                root_nodes.append((id1, id2))
-
-                for lab, pair_list in zip(["couple", "inlaws"], [self.couples, self.inlaws]):
-                    for rid1, rid2 in pair_list:
-                        if rel in rid1:
-                            rid1 = rid1.replace(f"{rel}1", f"{rel}{iter}")
-                            rid2 = rid2.replace(f"{rel}1", f"{rel}{iter}")
-                            famG.add_node((rid1, rid2), id1 = rid1, id2 = rid2, rel = lab, k = 0)
-                            famG.add_edge((id1, id2), (rid1, rid2))
-
-        self.famG = famG
-        self.root_nodes = root_nodes
+        return ibdG
 
     def segment_stitcher(self, segment_list, max_gap = 1):
         regions = {}
@@ -554,18 +710,29 @@ class PedigreeNetwork:
     
     def __init__(self, fam):
 
+        # can pass the fam pandas df or the file path to open the pandas df
         if type(fam) == str:
             fam = pd.read_csv(fam, delim_whitespace=True, header=None, dtype = str)
 
+        # name the columns
         fam.columns = ["FID", "IID", "Father", "Mother", "Sex", "Pheno"]
 
+        # convert sex to int
+        fam["Sex"] = fam["Sex"].apply(int)
+
+        # pedigree structure is a directed graph
         self.pedigree = nx.DiGraph()
+        # add all IID as nodes, with the sex as an attribute of the node
         self.pedigree.add_nodes_from([[row["IID"], dict(sex=row["Sex"])] for _, row in fam.iterrows()])
+        # write edges from father --> child and mother -->; edge attribute is down
         self.pedigree.add_edges_from([list(i) + [dict(dir="down")] for i in fam[fam.Father != "0"][["Father", "IID"]].values])
         self.pedigree.add_edges_from([list(i) + [dict(dir="down")] for i in fam[fam.Mother != "0"][["Mother", "IID"]].values])
+        # write edges from child --> parent; edge attribute is up
         self.pedigree.add_edges_from([list(i) + [dict(dir="up")] for i in fam[fam.Father != "0"][["IID", "Father"]].values])
         self.pedigree.add_edges_from([list(i) + [dict(dir="up")] for i in fam[fam.Mother != "0"][["IID", "Mother"]].values])
 
+        # these codes tell us how to get between different relationship types
+        # e.g., grandchild --> grandparent has you traverse up twice
         self.rel_code = {('up', 'up'): 'GP',
                         ('up', 'up', 'up'): 'GGP',
                         ('up', 'up', 'up', 'up'): 'GGGP',
@@ -575,7 +742,15 @@ class PedigreeNetwork:
                         ('up', 'down'): 'sib',
                         ('up',): 'PO'}
 
+        # relative df
+        self.relatives = pd.DataFrame(columns = ["id1", "id2", "E_ibd1", "E_ibd2", "maternal", "paternal"])
+
+    def get_pedigree(self):
+        return self.pedigree
+
     def find_relationship(self, id1, id2):
+
+        # a path is not legit if it goes up after it goes down; prevents relationship with a spouse/inlaw
         def legit_path(dir_path):
             down = False
             for d in dir_path:
@@ -584,44 +759,70 @@ class PedigreeNetwork:
                     return False
             return True
         
+        # we want to order id1, id2 as younger generation, older generation
         def reverse_path(id1, id2, path, path_dir):
-            # id1 is the genetically older individual
-            if path_dir.count("down") > path_dir.count("up"):
+            # True if id1 is in an older generation
+            reversed = path_dir.count("down") > path_dir.count("up")
+            # if id1 is in an older generation
+            if reversed:
+                # reverse the direction
                 path_dir = [{"down": "up", "up": "down"}[i] for i in path_dir[::-1]]
+                # path currently goes id1 --> id2, so reverse the list
                 path = path[::-1]
+                # switch the ids
                 id1, id2 = id2, id1
-            return id1, id2, path, path_dir
+            return id1, id2, path, path_dir, reversed
 
+        # get all paths between the two nodes, cutoff of 5
         paths = list(nx.all_simple_paths(self.pedigree, source = id1, target = id2, cutoff = 5))
+
+        # iterate through the paths
         for index, path in enumerate(paths):
+            # gets the directions of the edges in the path
             path_dir = [self.pedigree.get_edge_data(path[index], path[index+1])["dir"] for index in range(len(path)-1)]
-            id1_temp, id2_temp, path, path_dir = reverse_path(id1, id2, path, path_dir)
+            # reverse the path if id1 is in an older generation; if so, switches id1 and id2
+            id1_temp, id2_temp, path, path_dir, reversed = reverse_path(id1, id2, path, path_dir)
+            # update the path and get the sex of id1_temp's parent
             paths[index] = [id1_temp, id2_temp, self.pedigree.nodes[path[1]]["sex"], path_dir]
-        k = {"1": 0, "2": 0}
+
+        # keep track of how much IBD shared with each parent
+        k = {1: 0, 2: 0}
+        # list to store paths to be returned
         out_paths = []
+        # iterate through each path
         for id1, id2, sex, path_dir in paths:
+            # check to see if the path is legal through the pedigree
             if legit_path(path_dir):
-                propIBD = 0.5**len(path_dir)
-                k[sex] += propIBD
-                out_paths.append([id1, id2, sex, self.rel_code.get(tuple(path_dir), "Other"), propIBD])
-        ibd1 = k["1"]*(1-k["2"]) + (1-k["1"])*k["2"]
-        ibd2 = k["1"] * k["2"]
-        propIBD = k["1"] + k["2"]
+                # get the prop IBD1 for the number of meioses between the two
+                ibd1 = 0.5**(len(path_dir)-1)
+                # add the amount of ibd to the parent
+                k[sex] += ibd1
+                # add the path and get the relationship
+                out_paths.append([id1, id2, sex, self.rel_code.get(tuple(path_dir), "Other"), ibd1])
+        # expected proportion of genome IBD1
+        ibd1 = k[1]*(1-k[2]) + (1-k[1])*k[2]
+        # expected proportion of the genome IBD2
+        ibd2 = k[1] * k[2]
+        # expected prop IBD
+        propIBD = 0.5*ibd1 + ibd2
+
         return [ibd1, ibd2, propIBD, out_paths]
 
+    # finds all the relationships
     def get_paths(self):
+        # first get all the paths in the graph that are, at most, 5 edges long
         paths = dict(nx.all_pairs_shortest_path(self.pedigree, 5))
-
         rels = []
         for id1 in paths:
             for id2 in paths[id1]:
                 if id1 >= id2:
                     continue
-                relationships = self.find_relationship(id1, id2)
+                ibd1, ibd2, propIBD, out_paths = self.find_relationship(id1, id2)
+                for id1_temp, id2_temp, sex, rel, _ in out_paths:
+                    rels.append([(id1, id2), id1_temp, id2_temp,])
+                
                 rels.append(relationships)
-
-
-
+        
 
 class Karyogram:
     def __init__(self, map_file, cm = True):
@@ -675,3 +876,32 @@ class Karyogram:
         plt.tick_params(left = False)
 
         plt.savefig(f"{kwargs.get('file_name', 'karyogram')}.png", dpi = kwargs.get('dpi', 500))
+
+# p = PedigreeNetwork("Himba_allPO.fam")
+# p.get_paths()
+
+# p = PedSims("")
+# p.subset_vcf("plink_keep.txt", "../ponderosa/plink_data/Himba_shapeit.chr1.vcf")
+if __name__ == "__main__":
+    if sys.argv[-1] == "plink_unrelateds":
+        r = RemoveRelateds()
+        r.plink_unrelateds(sys.argv[-3], float(sys.argv[-2]))
+
+    if sys.argv[-1] == "concat_rel":
+        p = PedSims("")
+        with concurrent.futures.ProcessPoolExecutor() as executor:
+            results = [executor.submit(p.run_ibd_iteration, sys.argv[-4], sys.argv[-3], sys.argv[-2], chrom) for chrom in range(1, 23)]
+            ibd_results = pd.concat([f.result() for f in concurrent.futures.as_completed(results)]).reset_index(drop=True)
+        try:
+            df = pd.read_feather("simulated_segments.f")
+            df = pd.concat([df, ibd_results]).reset_index(drop=True)
+        except:
+            df = ibd_results
+
+        df.to_feather("simulated_segments.f")
+
+    if sys.argv[-1] == "interpolate":
+        interpolate_map(sys.argv[-3], sys.argv[-2])
+    if sys.argv[-1] == "subset_vcf":
+        p = PedSims("")
+        p.subset_vcf(sys.argv[-3], sys.argv[-2])
