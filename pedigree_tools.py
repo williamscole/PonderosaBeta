@@ -376,17 +376,17 @@ class PedSims:
                                 "CO": ("g3-b1-i1", "g3-b2-i1"),
                                 "CORM": ("g3-b2-i1", "g4-b1-i1")},
                         "mhs": {"MHS": ("g2-b1-i1", "g2-b2-i1"),
-                                "HCO": ("g3-b1-i1" , "g3-b2-i1"),
-                                "HAV1": ("g2-b1-i1", "g3-b2-i1"),
-                                "HAV2": ("g2-b2-i1", "g3-b1-i1")},
+                                "MHCO": ("g3-b1-i1" , "g3-b2-i1"),
+                                "MHAV1": ("g2-b1-i1", "g3-b2-i1"),
+                                "MHAV2": ("g2-b2-i1", "g3-b1-i1")},
                         "phs": {"PHS": ("g2-b1-i1", "g2-b2-i1"),
-                                "HCO": ("g3-b1-i1" , "g3-b2-i1"),
-                                "HAV1": ("g2-b1-i1", "g3-b2-i1"),
-                                "HAV2": ("g2-b2-i1", "g3-b1-i1")},
+                                "PHCO": ("g3-b1-i1" , "g3-b2-i1"),
+                                "PHAV1": ("g2-b1-i1", "g3-b2-i1"),
+                                "PHAV2": ("g2-b2-i1", "g3-b1-i1")},
                         "mgp": {"MGP": ("g1-b1-i1", "g3-b1-i1"),
-                                "GGP": ("g1-b1-s1", "g4-b1-i1")},
+                                "MGGP": ("g1-b1-s1", "g4-b1-i1")},
                         "pgp": {"PGP": ("g1-b1-i1", "g3-b1-i1"),
-                                "GGP": ("g1-b1-s1", "g4-b1-i1")}}
+                                "PGGP": ("g1-b1-s1", "g4-b1-i1")}}
 
         def rename_id(cur_id, rel_name, index):
             cur_id = cur_id.split("_")[0]
@@ -409,7 +409,7 @@ class PedSims:
         for relative, (id1, id2) in relative_ids[rel].items():
             df = ibd_results[ibd_results.apply(lambda x: id1 in x.id1 and id2 in x.id2 and x.id1.split("_")[0] == x.id2.split("_")[0], axis = 1)].copy()
             df["id1"] = df["id1"].apply(lambda x: rename_id(x, relative, 1))
-            df["id2"] = df["id1"].apply(lambda x: rename_id(x, relative, 2))
+            df["id2"] = df["id2"].apply(lambda x: rename_id(x, relative, 2))
             df["relative"] = relative
             relative_segs = pd.concat([relative_segs, df.drop(["start", "end"], axis=1)])
 
