@@ -4,7 +4,7 @@ import pandas as pd
 import itertools as it
 import numpy as np
 from datetime import datetime
-import phasedibd as ibd
+# import phasedibd as ibd
 import os
 from collections import Counter
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
@@ -50,21 +50,29 @@ def split_regions(region_dict, new_region):
         out_region[(start,stop)] = sorted(it.chain(*info))
     return out_region
 
-# perform various computations on ibd segments
+# perform various computations on ibd segments for a pair of individuals
+# takes as input a phasedibd segment data frame
 class ProcessSegments:
     def __init__(self, pair_df):
         self.segs = pair_df
 
+    '''Function takes as input a region_dict, which has the following format:
+        {(start, stop): [obj1, obj2, obj3, ...]}
+        Also takes as input a new_region which has format: [start, stop, obj]
+        This function sees if there is overlap between the new region and existing regions
+        If there is overlap, it splits the current region into new regions and concats the objs'''
     def split_regions(self, region_dict, new_region):
         # returns the overlap of 2 regions (<= 0 if no overlap)
         def overlap(region1, region2):
             start1, end1 = region1
             start2, end2 = region2
             return min(end1,end2) - max(start1,start2)
+
         # out region will be returned; is a dict of regions mapping to members of region    
         out_region = dict()
         # overlapped keeps track of all the regions that overlap with the new region
         overlapped = {tuple(new_region[:2]):[new_region[2]]}
+
         # iterate through the existing regions
         for region in sorted(region_dict):
             # if overlap
@@ -78,6 +86,7 @@ class ProcessSegments:
             # no overlap, but add the region to the out_region dict
             else:
                 out_region[region] = region_dict[region]
+        
         # all the segments in overlapped overlap, so each consecutive pairs of coordinates in sites should/could have different members
         sites = sorted(set(it.chain(*overlapped)))
         # iterate thru consecutive sites
@@ -86,79 +95,413 @@ class ProcessSegments:
             info = [j for i, j in overlapped.items() if overlap((start, stop), i) > 0]
             # unpack the membership
             out_region[(start,stop)] = sorted(it.chain(*info))
+        
         return out_region
 
     # stitches together segments that are at most max_gap apart
     def segment_stitcher(self, segment_list, max_gap = 1):
         regions = {}
+
+        # iterate through the segments
         for start, stop in segment_list:
+
+            '''Alg works by adding start/stop positions to overlapped
+               We init overlapped with the start/stop of the segment
+               Next we iterate through the current regions
+               If there is overlap, we add the start/stop to overlapped
+               At the end, we create a new region taking the min of overlapped and the max of overlapped'''
             overlapped = {start, stop}
+
+            # we rewrite the regions
             updated_regions = set()
+
+            # iterate through the current regions
             for r1, r2 in regions:
+
+                # if there is a overlap with the ibd segment
                 if min(stop, r2) - max(start, r1) > -max_gap:
+                    # add the start/stop of the region
                     overlapped |= {r1, r2}
+                # no overlap, so add the region to the updated regions
                 else:
                     updated_regions |= {(r1, r2)}
+
+            # add the new segment/new region to updated regions
             updated_regions |= {(min(overlapped), max(overlapped))}
-            regions = updated_regions
+
+            # for the next iteration
+            regions = updated_regions.copy()
+
+        # return the regions
         return regions
 
     # returns ibd1, ibd2 values for the pair
     def get_ibd1_ibd2(self):
+
+        # init with ibd1 of 0 cM and ibd2 of 0 cM
         ibd1, ibd2 = 0, 0
+
+        # iterate through the chromosomes
         for chrom, chrom_df in self.segs.groupby("chromosome"):
+
+            # rdata frame
             r = {}
+
+            # iterate through the segments
             for _, row in chrom_df.iterrows():
-                r = split_regions(r, [row["start_cm"], row["end_cm"], row["id1_haplotype"]])
-                r = split_regions(r, [row["start_cm"], row["end_cm"], row["id2_haplotype"]+2])
+                # add the segments from the perspective of id1; name hap index as 0 --> 1 and 1 --> 2
+                r = split_regions(r, [row["start_cm"], row["end_cm"], row["id1_haplotype"]+1])
+                # add the segments from the perspective of id2; rename the haplotype index as 0 --> 3 and 1 --> 4
+                r = split_regions(r, [row["start_cm"], row["end_cm"], row["id2_haplotype"]+3])
+
+            # iterate through the regions
             for (start, end), hap in r.items():
+                # get the length of the region
                 l = end - start
-                if 0 in hap and 1 in hap and 2 in hap and 3 in hap:
+                # r is covered on all 4 haplotypes --> IBD2
+                if sum(set(hap)) == 10:
                     ibd2 += l
+                # not ibd2
                 else:
                     ibd1 += l
+        
         return ibd1, ibd2
 
     # returns the number of IBD segments
     def get_n_segments(self):
         n = 0
+
+        # run segment stitcher for each chromosome
         for _, chrom_df in self.segs.groupby("chromosome"):
             n += len(self.segment_stitcher(chrom_df[["start_cm", "end_cm"]].values))
+
         return n
 
     # returns the haplotype score of the pair
     def get_h_score(self):
         hap, tot = {0:0, 1:0}, 0
+
+        # iterate through the chromosome
         for _, chrom_df in self.segs.groupby("chromosome"):
             r= {}
+
+            # iterate through segments
             for _, row in chrom_df.iterrows():
-                r = self.split_regions(r, [row["start_cm"], row["end_cm"], row["id1_haplotype"]])
-                r = self.split_regions(r, [row["start_cm"], row["end_cm"], row["id2_haplotype"]+2])
-            temp = {0:0, 1:0, 2:0, 3:0}
+                # on id1
+                r = self.split_regions(r, [row["start_cm"], row["end_cm"], row["id1_haplotype"]+1])
+                # on id2
+                r = self.split_regions(r, [row["start_cm"], row["end_cm"], row["id2_haplotype"]+3])
+
+            # holds the hap information for the chromosome
+            temp = {1:0, 2:0, 3:0, 4:0}
             for (start, end), hapl in r.items():
+                # present on 1+ haplotype for at least one in the pair
                 if len(hapl) > 2:
                     continue
+                # get length of region and add to total
                 l = end - start
                 tot += l
+
+                # add the hap information
                 for h in hapl:
                     temp[h] += l
-            hap[0] += max(temp[0], temp[1])
-            hap[1] += max(temp[2], temp[3])
+            # for id1
+            hap[0] += max(temp[1], temp[2])
+            # for id2
+            hap[1] += max(temp[3], temp[4])
+
+        # return hap score
         return hap[0]/tot, hap[1]/tot
 
-    def run_ponderosa(self):
+    def ponderosa_data(self, genome_len):
+        # creates an empty class
         class ponderosa: pass
         ponderosa = ponderosa()
+
+        # add ibd1, ibd2 data
         ibd1, ibd2 = self.get_ibd1_ibd2()
-        ponderosa.ibd1 = ibd1
-        ponderosa.ibd2 = ibd2
+        ponderosa.ibd1 = ibd1 / genome_len
+        ponderosa.ibd2 = ibd2 / genome_len
+
+        # get the number of ibd segments
         ponderosa.n = self.get_n_segments()
+
+        # get haplotype scores
         h1, h2 = self.get_h_score()
         ponderosa.h1 = h1
         ponderosa.h2 = h2
+
+        # return the data
         return ponderosa
 
+# pair_df is a dataframe of a pair of relatives
+# mean_d is the mean distance between switch errors
+def introduce_phase_error(pair_df, mean_d):
+    
+    # given a mean distance between switch error returns a list of randomly drawn sites
+    def generate_switches(mean_d, index):
+        #start the switch at 0
+        switches, last_switch = [], 0
+        
+        # longest chrom is 287 cM 
+        while last_switch < 300:
+            
+            # add the new site to the previous site
+            switches.append(np.random.exponential(mean_d) + last_switch)
+            
+            # previous site is now the new site
+            last_switch = switches[-1]
+            
+        # return
+        return [(i, index) for i in switches]
+    
+    # store the newly create segments
+    new_segments = []
+    
+    for chrom, chrom_df in pair_df.groupby("chromosome"):
+    
+        # generate the switch locations
+        s1 = generate_switches(mean_d, 0)
+        s2 = generate_switches(mean_d, 1)
+        switches = np.array(sorted(s1 + s2))
+        switch_index, switches = switches[:,1], switches[:,0]
 
+        # old segments
+        segments = chrom_df[["start_cm", "end_cm", "id1_haplotype", "id2_haplotype", "id1", "id2", "chromosome"]].values
+
+        # iterate through the segments
+        for start, stop, hap1, hap2, id1, id2, chrom in segments:
+
+            # get number of switches before the segment
+            n_dict = {0: len(np.where(np.logical_and(switches<start, switch_index==0))[0]),
+                    1: len(np.where(np.logical_and(switches<start, switch_index==1))[0])}
+
+
+            # get the index of switches within the segment
+            b = np.where(np.logical_and(switches>=start, switches<=stop))[0]
+
+            # iterate through the switches and the switch index in the segment
+            for s, index in zip(switches[b], switch_index[b]):
+                # add the broken segment as the current start --> s and add n, which is the number of preceding switches
+                new_segments.append([chrom, id1, id2, hap1, hap2, start, s, n_dict[0], n_dict[1]])
+
+                # new start
+                start = s
+
+                # increase the number of switches by 1 but only on the relevant switch
+                n_dict[index] += 1
+
+            # add the final segment
+            new_segments.append([chrom, id1, id2, hap1, hap2, start, stop, n_dict[0], n_dict[1]])
+
+    pair_df = pd.DataFrame(new_segments, columns = ["chromosome", "id1", "id2", "id1_haplotype", "id2_haplotype", "start_cm", "end_cm", "n1", "n2"])
+    pair_df["l"] = pair_df["end_cm"] - pair_df["start_cm"]
+    pair_df = pair_df[pair_df.l >= 2.5]
+    pair_df["id1_haplotype"] = pair_df[["id1_haplotype", "n1"]].apply(lambda x: x[0] if x[1]%2 == 0 else (x[0]+1)%2, axis = 1)
+    pair_df["id2_haplotype"] = pair_df[["id2_haplotype", "n2"]].apply(lambda x: x[0] if x[1]%2 == 0 else (x[0]+1)%2, axis = 1)
+
+    return pair_df
+
+class PedigreeHierarchy:
+    
+    def __init__(self, hier = []):
+        
+        # no specified hierarchy supplied
+        if len(hier) == 0:
+            hier = [["1st", "PO"],
+                    ["1st", "FS"],
+                    ["2nd", "GP/AV"],
+                    ["GP/AV", "GP"],
+                    ["GP", "MGP"],
+                    ["GP", "PGP"],
+                    ["2nd", "HS"],
+                    ["HS", "MHS"],
+                    ["HS", "PHS"],
+                    ["GP/AV", "AV"],
+                    ["3rd", "CO"],
+                    ["3rd", "GGP"],
+                    ["GGP", "MGGP"],
+                    ["GGP", "PGGP"],
+                    ["3rd", "HAV"],
+                    ["HAV", "MHAV1"],
+                    ["HAV", "MHAV2"],
+                    ["HAV", "PHAV1"],
+                    ["HAV", "PHAV2"],
+                    ["4th", "HCO"],
+                    ["HCO", "MHCO"],
+                    ["HCO", "PHCO"],
+                    ["4th", "CORM"]]
+        self.hier = nx.DiGraph()
+        self.hier.add_edges_from(hier)
+        self.init_nodes = set(self.hier.nodes)
+    
+    # child_node is the relative pair, parent_node is the relationship they fall under
+    def add_relative(self, parent_node, child_node):
+        self.hier.add_edge(parent_node, child_node)
+    
+    # given a relationship, returns the the relative pairs under that relationship
+    def get_pairs(self, node):
+        children = set(nx.descendants(self.hier, node))
+        return children - self.init_nodes
+    
+    # given a list of relationship nodes, returns all pairs under
+    def get_pairs_from_list(self, node_list):
+        return set(it.chain(*[self.get_pairs(node) for node in node_list]))
+        
+    # returns the hierarchy structure
+    def get_hierarchy(self):
+        return self.hier
+    
+    
+class TrainPonderosa:
+    def __init__(self, real_data, genome_len, **kwargs):
+        
+        # obj will store pair information
+        self.pairs = PedigreeHierarchy()
+        
+        # if using real data, there are additional kwargs
+        if real_data:
+            ibd_segments = kwargs["ibd"]
+            rels = kwargs["relative_df"]
+        
+        else:
+            # load the simulated segments
+            sim_df = pd.read_feather("simulated_segments.f")
+            
+            # iterate through the different relationships
+            for rel, rel_df in sim_df.groupby("relative"):
+                
+                # iterate through the pairs
+                for pair, pair_df in rel_df.groupby(["id1", "id2"]):
+                    
+                    # get the data needed for ponderosa
+                    s = ProcessSegments(pair_df)
+                    data = s.ponderosa_data(genome_len)
+                    
+                    # add the data to the pair obj
+                    self.pairs.add_relative(rel, data)
+                    
+                    # get switch errors if second
+                    if rel in ["MGP", "PGP", "MHS", "PHS", "AV"]:
+                        
+                        # get switch errors
+                        pair_df_se = introduce_phase_error(pair_df, kwargs.get("mean_d", 30))
+                        
+                        # get h1 and h2
+                        s = ProcessSegments(pair_df_se)
+                        data = s.ponderosa_data(genome_len)
+                        
+                        # add to pedigree hierarchy
+                        self.pairs.add_relative("PhaseError", data)
+                
+    # given a set of relative nodes (e.g., 2nd, HS, MHS, etc.), return dataframe with the attributes in attrs
+    def get_dataframe(self, rel_nodes, attrs):
+        pair_df = pd.DataFrame()
+        
+        for node in rel_nodes:
+            
+            df = pd.DataFrame(self.pairs.get_pairs(node), columns = ["pair"])
+            df["node"] = node
+            pair_df = pd.concat([pair_df, df])            
+        
+        for col in attrs:
+            pair_df[col] = pair_df["pair"].apply(lambda x: getattr(x, col))
+            
+        return pair_df[attrs + ["node"]]
+    
+    # given a classifier, plots the probability space
+    def plot_classifier(self, classif, classif_name, xlim, ylim, xlab, ylab, data, n_comp):
+        
+        cmaps = ["Blues", "Greens", "Purples", "Reds"]
+        colors = ["blue", "green", "purple", "red"]
+        
+        # plot classifier
+        x = np.linspace(xlim[0], xlim[1], 100)
+        y = np.linspace(ylim[0], ylim[1], 100)
+        X, Y = np.meshgrid(x, y)
+        
+        for cat in range(n_comp):
+            Z = []
+            for row in range(100):
+                Z.append([p[cat] for p in classif.predict_proba([[x, y] for x, y in zip(X[row], Y[row])])])
+            plt.contourf(X, Y, np.array(Z), cmap = cmaps[cat], levels=np.linspace(0.5, 1, 10))
+        plt.colorbar().set_label(label = "Probability", size=12)
+        
+        # plot the points
+        sns.scatterplot(data = data, x = xlab, y = ylab, hue = "node", alpha = 0.8)
+        
+        # save fig
+        plt.savefig("{}_classifier.png".format(classif_name), dpi=500)
+        
+        plt.close()
+    
+    # creates the classifier for degrees of relatedness
+    def degree_classifier(self, classifier = "lda"):
+        
+        training_data = self.get_dataframe(["FS", "2nd", "3rd", "4th"], ["ibd1", "ibd2"])
+        
+        if classifier == "gmm":
+            
+            classif = GaussianMixture(n_components=4, means_init = [[0.5, 0.25], [0.5, 0], [0.25, 0], [0.125, 0]],
+                                         weights_init = np.full(4, 0.25),
+                                         covariance_type = "tied").fit(training_data[["ibd1", "ibd2"]].values)
+            
+        elif classifier == "lda":
+            classif = LinearDiscriminantAnalysis().fit(training_data[["ibd1", "ibd2"]].values, training_data["node"].values)
+            
+        self.plot_classifier(classif, "degree", (0,0.75), (0,0.4), "ibd1", "ibd2", training_data, 4)
+        
+        return classif
+        
+    # creates the classifier for the n of segments
+    def nsegs_classifier(self):
+        
+        # get the training data
+        training_df = self.get_dataframe(["AV", "MGP", "MHS", "PGP", "PHS"], ["n", "ibd1", "ibd2"])
+        
+        # convert ibd1 and ibd2 to a cM kinship
+        training_df["k"] = training_df.apply(lambda x: x.ibd2 + x.ibd1/2, axis = 1)
+        
+        # fit the model
+        lda = LinearDiscriminantAnalysis().fit(training_df[["n", "k"]].values, training_df["node"].values)
+        
+        # plot classifier
+        mean_k = training_df["k"].mean()
+        
+        # compute probabilities
+        probs = lda.predict_proba([[n, mean_k] for n in range(20, 100)])
+        
+        # create df and plot
+        fig, (ax1, ax2) = plt.subplots(1, 2)
+        df = pd.DataFrame(probs)
+        df[5] = np.arange(20,100)
+        df = df.melt(id_vars = [5], value_vars=[0,1,2,3,4])
+        sns.lineplot(data = df, ax = ax1, x = 5, y = "value", hue = "variable", palette = "tab10")
+        plt.xlabel("n of segments")
+        plt.ylabel("Probability")
+        sns.histplot(data = training_df, ax = ax2, x = "n", hue = "node", bins = 60)
+        
+        fig.set_size_inches(12, 5)
+
+        
+        plt.savefig("nsegs_classifier.png", dpi=500)
+        plt.close()
+        
+        return lda
+    
+    # creates the classifier for the haplotype score classifier
+    def hap_classifier(self):
+        
+        # get the training data
+        training_data = self.get_dataframe(["GP/AV", "HS", "PhaseError"], ["h1", "h2"])
+        
+        # train the classifier
+        lda = LinearDiscriminantAnalysis().fit(training_data[["h1", "h2"]].values, training_data["node"].values)
+        
+        self.plot_classifier(lda, "hap", (0.5, 1), (0.5, 1), "h1", "h2", training_data, 3)
+        
+        return lda
+        
 
 # takes as input a map_file (either all chrom together or separate) and a vcf file
 def interpolate_map(map_file, vcf_file):
@@ -345,6 +688,7 @@ class RemoveRelateds:
         _ = outfile.write("\n".join(run.unrelateds))
         
         print(f"Wrote out {len(run.unrelateds)} IDs to keep to 'sim_keep.txt'")
+
 
 class PedSims:
 
