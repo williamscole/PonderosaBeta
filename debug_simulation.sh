@@ -1,0 +1,2 @@
+rm -r ponderosa_simulations/
+python3 simulate_relatives.py --king /users/cwilli50/ponderosa/King_Relatedness_no2278.seg --n_pairs 5 --simmap /users/cwilli50/ped-sim/refined_mf.simmap --intf /users/cwilli50/ped-sim/interfere/nu_p_campbell.tsv --pedsim /users/cwilli50/ped-sim/ped-sim --slurm 'sbatch -t 1:00:00 --mem 16gb --wrap "%s"' --vcf /users/cwilli50/Ponderosa-beta/Himba_shapeit_merged.vcf.gz --map /users/cwilli50/ponderosa/plink_data/newHimba_shapeit.chr1.map 
