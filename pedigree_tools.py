@@ -1,4 +1,3 @@
-from cmath import phase
 import networkx as nx
 import pandas as pd
 import itertools as it
@@ -505,17 +504,19 @@ class TrainPonderosa:
 
 # takes as input a map_file (either all chrom together or separate) and a vcf file
 def interpolate_map(map_file, vcf_file):
-    # take all the sites from the vcf
-    vcf_pos = []
-    with open(vcf_file) as vcf:
-        for line in vcf:
-            if "#" in line:
-                continue
-            chrom, pos, rsid = line.split()[:3]
-            vcf_pos.append([int(chrom), int(pos), rsid])
+    # # take all the sites from the vcf
+    # vcf_pos = []
+    # with open(vcf_file) as vcf:
+    #     for line in vcf:
+    #         if "#" in line:
+    #             continue
+    #         chrom, pos, rsid = line.split()[:3]
+    #         vcf_pos.append([int(chrom), int(pos), rsid])
 
-    # create dataframe from the vcf sites
-    out_map = pd.DataFrame(vcf_pos, columns=["CHROM", "MB", "rsID"])
+    # # create dataframe from the vcf sites
+    # out_map = pd.DataFrame(vcf_pos, columns=["CHROM", "MB", "rsID"])
+
+    out_map = pd.read_csv(vcf_file, delim_whitespace=True, header=None, names=["CHROM", "MB", "rsID"])
 
     # we have multiple map files
     if "chr1" in map_file:
@@ -548,10 +549,15 @@ class RemoveRelateds:
 
     # takes as input a king file
     # threshold_func is a func that takes as input PropIBD, IBD1Seg, IBD2Seg, InfType and returns True if the input is considered to be related
-    def king_graph(self, king_file: str, threshold_func):
+    def king_graph(self, king_file, threshold_func):
 
-        # read in king file
-        king = pd.read_csv(king_file, delim_whitespace = True, dtype = {"ID1": str, "ID2": str})
+        if type(king_file) == str:
+            # read in king file
+            king = pd.read_csv(king_file, delim_whitespace = True, dtype = {"ID1": str, "ID2": str})
+
+        # we can also load an existing king df
+        else:
+            king = king_file
 
         # create graph structure with the kinship coeff
         self.kinG = nx.Graph()
@@ -559,6 +565,7 @@ class RemoveRelateds:
 
         # build the kinship graph
         G = nx.Graph()
+        G.add_nodes_from(self.kinG.nodes)
         king_related = king[king[["PropIBD", "IBD1Seg", "IBD2Seg", "InfType"]].apply(lambda x: threshold_func(*x), axis = 1)]
         G.add_edges_from(king_related[["ID1", "ID2"]].values)
 
@@ -754,6 +761,65 @@ class PedSims:
             df = ibd_results[ibd_results.apply(lambda x: id1 in x.id1 and id2 in x.id2 and x.id1.split("_")[0] == x.id2.split("_")[0], axis = 1)].copy()
             df["id1"] = df["id1"].apply(lambda x: rename_id(x, relative, 1))
             df["id2"] = df["id2"].apply(lambda x: rename_id(x, relative, 2))
+            df["relative"] = relative
+            relative_segs = pd.concat([relative_segs, df.drop(["start", "end"], axis=1)])
+
+        return relative_segs
+
+    def run_pop_ibd_iteration(self, map_file, rel, iter, pop, chrom):
+        import phasedibd as ibd
+
+        # converts indices to the actual iid
+        def return_ids(vcff):
+            with open(vcff) as vcf:
+                    for lines in vcf:
+                        if "#CHROM" in lines:
+                            return lines.split()[9:]
+
+        # dict that stores the IDs for each relationship type
+        relative_ids = {"av": {"AV": ("g2-b2-i1", "g3-b1-i1"),
+                                "FS": ("g2-b1-i1", "g2-b2-i1"),
+                                "CO": ("g3-b1-i1", "g3-b2-i1"),
+                                "CORM": ("g3-b2-i1", "g4-b1-i1")},
+                        "mhs": {"MHS": ("g2-b1-i1", "g2-b2-i1"),
+                                "MHCO": ("g3-b1-i1" , "g3-b2-i1"),
+                                "MHAV1": ("g2-b1-i1", "g3-b2-i1"),
+                                "MHAV2": ("g2-b2-i1", "g3-b1-i1")},
+                        "phs": {"PHS": ("g2-b1-i1", "g2-b2-i1"),
+                                "PHCO": ("g3-b1-i1" , "g3-b2-i1"),
+                                "PHAV1": ("g2-b1-i1", "g3-b2-i1"),
+                                "PHAV2": ("g2-b2-i1", "g3-b1-i1")},
+                        "mgp": {"MGP": ("g1-b1-i1", "g3-b1-i1"),
+                                "MGGP": ("g1-b1-s1", "g4-b1-i1")},
+                        "pgp": {"PGP": ("g1-b1-i1", "g3-b1-i1"),
+                                "PGGP": ("g1-b1-s1", "g4-b1-i1")}}
+
+        def rename_id(cur_id, rel_name, index):
+            cur_id = cur_id.split("_")[0]
+            sim_iter = int("".join([i for i in cur_id if i.isnumeric()]))
+            return f"i{iter}{rel_name}{sim_iter}_{index}"
+        
+        vcff = f"{pop}/{rel}{iter}_chr{chrom}.vcf"
+
+        print(vcff)
+
+        # hap = ibd.VcfHaplotypeAlignment(f"sim_chr{chrom}.vcf", map_file.replace("chr1", f"chr{chrom}"))
+        hap = ibd.VcfHaplotypeAlignment(vcff, map_file)
+        tpbwt = ibd.TPBWTAnalysis()
+        ibd_results = tpbwt.compute_ibd(hap, use_phase_correction=False)
+
+        # convert the index IDs to their actual IDs
+        convert = {index:i.split()[0] for index,i in enumerate(return_ids(vcff))}
+        ibd_results["id1"] = ibd_results.apply(lambda x: convert[x.id1],axis=1)
+        ibd_results["id2"] = ibd_results.apply(lambda x: convert[x.id2],axis=1)
+
+        # extract the relative segments
+        relative_segs = pd.DataFrame()
+
+        for relative, (id1, id2) in relative_ids[rel].items():
+            df = ibd_results[ibd_results.apply(lambda x: id1 in x.id1 and id2 in x.id2 and x.id1.split("_")[0] == x.id2.split("_")[0], axis = 1)].copy()
+            # df["id1"] = df["id1"].apply(lambda x: rename_id(x, relative, 1))
+            # df["id2"] = df["id2"].apply(lambda x: rename_id(x, relative, 2))
             df["relative"] = relative
             relative_segs = pd.concat([relative_segs, df.drop(["start", "end"], axis=1)])
 
@@ -1243,6 +1309,16 @@ if __name__ == "__main__":
             df = ibd_results
 
         df.to_feather("simulated_segments.f")
+
+    if sys.argv[-1] == "pop_ibd":
+        p = PedSims("")
+        # map_file, rel, iter, pop, chrom
+        map_file, rel, iter, pop, chrom = [sys.argv[i] for i in range(-6, -1)]
+
+        # run ibd
+        ibd_results = p.run_pop_ibd_iteration(map_file, rel, iter, pop, chrom)
+        
+        ibd_results.reset_index(drop=True).to_csv(f"{pop}/{pop}_chr{chrom}_{rel}{iter}.txt", sep="\t", index=False)
 
     if sys.argv[-1] == "interpolate":
         interpolate_map(sys.argv[-3], sys.argv[-2])
