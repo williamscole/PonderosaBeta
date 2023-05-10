@@ -823,7 +823,7 @@ class PedSims:
             df["relative"] = relative
             relative_segs = pd.concat([relative_segs, df.drop(["start", "end"], axis=1)])
 
-        return relative_segs
+        return ibd_results
 
     # takes as input a pair's segments and returns IBD1 and IBD2 cM
     def ibd1_ibd2(self, seg_df):
