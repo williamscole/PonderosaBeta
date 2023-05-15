@@ -11,7 +11,7 @@ from sklearn.mixture import GaussianMixture
 import matplotlib.patches as patches
 import matplotlib.pyplot as plt
 import seaborn as sns
-import pickle
+import pickle as pkl
 import sys
 import concurrent.futures
 
@@ -353,10 +353,16 @@ class PedigreeHierarchy:
     
     
 class TrainPonderosa:
-    def __init__(self, real_data, genome_len, **kwargs):
+    def __init__(self, real_data, **kwargs):
         
         # obj will store pair information
         self.pairs = PedigreeHierarchy()
+
+        # stores args
+        self.args = kwargs
+        
+        # stores if real data
+        self.read_data = real_data
         
         # if using real data, there are additional kwargs
         if real_data:
@@ -365,8 +371,17 @@ class TrainPonderosa:
         
         else:
             # load the simulated segments
-            sim_df = pd.read_feather("simulated_segments.f")
+            segment_files = os.listdir("segments/")
+            sim_df = pd.concat([pd.read_feather(f"segments/{i}") for i in segment_files])
+
+            # get the genome len
+            pop = sim_df["pop"].values[0]
             
+            genome_len = 0
+            for chrom in range(1, 23):
+                temp = pd.read_csv(f"{pop}/sim_chr{chrom}.map", delim_whitespace=True, header=None)
+                genome_len += (temp[2].max() - temp[2].min())
+
             # iterate through the different relationships
             for rel, rel_df in sim_df.groupby("relative"):
                 
@@ -500,6 +515,26 @@ class TrainPonderosa:
         self.plot_classifier(lda, "hap", (0.5, 1), (0.5, 1), "h1", "h2", training_data, 3)
         
         return lda
+    
+    def train_classifiers(self, directory = ""):
+
+        ### hap classifier
+        hap_classif = self.hap_classifier()
+        f = open(f"{directory}hap_classifier.pkl", "wb")
+        pkl.dump(hap_classif, f)
+        f.close()
+
+        ### n segs classifier
+        nsegs_classif = self.nsegs_classifier()
+        f = open(f"{directory}nsegs_classifier.pkl", "wb")
+        pkl.dump(nsegs_classif, f)
+        f.close()
+
+        ### degree classifier
+        degree_classif = self.degree_classifier()
+        f = open(f"{directory}degree_classifier.pkl", "wb")
+        pkl.dump(degree_classif, f)
+        f.close()
         
 
 # takes as input a map_file (either all chrom together or separate) and a vcf file
@@ -824,6 +859,60 @@ class PedSims:
             relative_segs = pd.concat([relative_segs, df.drop(["start", "end"], axis=1)])
 
         return ibd_results
+
+    def rename_ibd_segments(self, segment_file, pop, rel, sim_iter):
+        relative_ids = {"av": {"AV": ("g2-b2-i1", "g3-b1-i1"),
+                                "FS": ("g2-b1-i1", "g2-b2-i1"),
+                                "CO": ("g3-b1-i1", "g3-b2-i1"),
+                                "CORM": ("g3-b2-i1", "g4-b1-i1")},
+                        "mhs": {"MHS": ("g2-b1-i1", "g2-b2-i1"),
+                                "MHCO": ("g3-b1-i1" , "g3-b2-i1"),
+                                "MHAV1": ("g2-b1-i1", "g3-b2-i1"),
+                                "MHAV2": ("g2-b2-i1", "g3-b1-i1")},
+                        "phs": {"PHS": ("g2-b1-i1", "g2-b2-i1"),
+                                "PHCO": ("g3-b1-i1" , "g3-b2-i1"),
+                                "PHAV1": ("g2-b1-i1", "g3-b2-i1"),
+                                "PHAV2": ("g2-b2-i1", "g3-b1-i1")},
+                        "mgp": {"MGP": ("g1-b1-i1", "g3-b1-i1"),
+                                "MGGP": ("g1-b1-s1", "g4-b1-i1")},
+                        "pgp": {"PGP": ("g1-b1-i1", "g3-b1-i1"),
+                                "PGGP": ("g1-b1-s1", "g4-b1-i1")}}
+        
+        def rename_id(rel_name, sim_iter, iiter, id_index):
+            return f"{rel_name}{id_index}_{pop}_i{iiter}_sim{sim_iter}"
+
+        keep_ids = {j:i for i,j in relative_ids[rel].items()}
+
+        segments = pd.concat([pd.read_csv(segment_file.replace("chr1", f"chr{chrom}"), delim_whitespace=True) for chrom in range(1,23)])
+
+        # id1, id2 should be ordered correctly
+        ordered = segments["id1"] < segments["id2"]
+        to_order = segments[~ordered]
+        to_order[["id1","id1_haplotype","id2","id2_haplotype"]] = to_order[["id2","id2_haplotype","id1","id1_haplotype"]]
+
+        # concat the ordered, not ordered pairs
+        segments = pd.concat([segments[ordered], to_order])
+        segments["pair"] = segments.apply(lambda x: (x.id1.split("_")[-1], x.id2.split("_")[-1]), axis=1)
+        segments["relative"] = segments["pair"].apply(lambda x: keep_ids.get(x, np.nan))
+        segments = segments.dropna(subset="relative", axis=0)
+
+        # get the different sim iters and make sure they're from the same simuation
+        segments["iter1"] = segments["id1"].apply(lambda x: int("".join([i for i in x.split("_")[1] if i.isnumeric()])))
+        segments["iter2"] = segments["id2"].apply(lambda x: int("".join([i for i in x.split("_")[1] if i.isnumeric()])))
+        segments = segments[segments.iter1 == segments.iter2]
+
+        # rename the segments
+        segments["id1"] = segments.apply(lambda x: rename_id(x.relative, sim_iter, x.iter1, 1), axis=1)
+        segments["id2"] = segments.apply(lambda x: rename_id(x.relative, sim_iter, x.iter2, 2), axis=1)
+
+        # add the pop col
+        segments["pop"] = pop
+
+        segments = segments[["chromosome", "id1", "id1_haplotype", "id2", "id2_haplotype", "start_cm", "end_cm", "start_bp", "end_bp", "relative", "pop"]].reset_index(drop=True)
+
+        # write out
+        segments.to_feather(f"segments/{rel}_{pop}_sim{sim_iter}_segments.f")
+
 
     # takes as input a pair's segments and returns IBD1 and IBD2 cM
     def ibd1_ibd2(self, seg_df):
@@ -1319,6 +1408,12 @@ if __name__ == "__main__":
         ibd_results = p.run_pop_ibd_iteration(map_file, rel, iter, pop, chrom)
         
         ibd_results.reset_index(drop=True).to_csv(f"{pop}/{pop}_chr{chrom}_{rel}{iter}.txt", sep="\t", index=False)
+
+    if sys.argv[-1] == "rename_pop_ibd":
+        segment_file, pop, rel, sim_iter = [sys.argv[i] for i in range(-5, -1)]
+
+        p = PedSims("")
+        p.rename_ibd_segments(segment_file, pop, rel, sim_iter)
 
     if sys.argv[-1] == "interpolate":
         interpolate_map(sys.argv[-3], sys.argv[-2])

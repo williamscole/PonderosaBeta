@@ -208,6 +208,10 @@ if __name__ == "__main__":
             print("Cannot find [ibdcaller].sh")
             sys.exit()
 
+        # make a dir for the segments
+        mkdir = subprocess.Popen(f"mkdir {directory}/segments", shell=True, stdout=subprocess.PIPE)
+        mkdir.wait()
+
         # move the python script into the new folder
         cp = subprocess.Popen(f"cp pedigree_tools.py {directory}/", shell=True, stdout=subprocess.PIPE)
         cp.wait()
