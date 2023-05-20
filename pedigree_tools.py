@@ -894,7 +894,7 @@ class PedSims:
         segments = pd.concat([segments[ordered], to_order])
         segments["pair"] = segments.apply(lambda x: (x.id1.split("_")[-1], x.id2.split("_")[-1]), axis=1)
         segments["relative"] = segments["pair"].apply(lambda x: keep_ids.get(x, np.nan))
-        segments = segments.dropna(subset="relative", axis=0)
+        segments = segments.dropna(subset=["relative"], axis=0)
 
         # get the different sim iters and make sure they're from the same simuation
         segments["iter1"] = segments["id1"].apply(lambda x: int("".join([i for i in x.split("_")[1] if i.isnumeric()])))
@@ -902,8 +902,12 @@ class PedSims:
         segments = segments[segments.iter1 == segments.iter2]
 
         # rename the segments
-        segments["id1"] = segments.apply(lambda x: rename_id(x.relative, sim_iter, x.iter1, 1), axis=1)
-        segments["id2"] = segments.apply(lambda x: rename_id(x.relative, sim_iter, x.iter2, 2), axis=1)
+        # segments["id1"] = segments.apply(lambda x: rename_id(x.relative, sim_iter, x.iter1, 1), axis=1)
+        # segments["id2"] = segments.apply(lambda x: rename_id(x.relative, sim_iter, x.iter2, 2), axis=1)
+
+        # rename the segments (alt)
+        segments["id1"] = [rename_id(r, sim_iter, i, 1) for r, i in segments[["relative", "iter1"]].values]
+        segments["id2"] = [rename_id(r, sim_iter, i, 2) for r, i in segments[["relative", "iter2"]].values]
 
         # add the pop col
         segments["pop"] = pop
@@ -1420,3 +1424,4 @@ if __name__ == "__main__":
     if sys.argv[-1] == "subset_vcf":
         p = PedSims("")
         p.subset_vcf(sys.argv[-3], sys.argv[-2])
+        
