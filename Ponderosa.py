@@ -3,359 +3,337 @@ import pandas as pd
 import pickle as pkl
 import networkx as nx
 import argparse
-from pedigree_tools import ProcessSegments
+import os
+from pedigree_tools import ProcessSegments, PedigreeHierarchy
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--ibd", help = "IBD segment file. If multiple files for each chromosome, this is the path for chromosome 1.", required=True)
-    # parser.add_argument("--fam", "PLINK-formated .fam file")
-    # parser.add_argument("--ages", "Age file. First column is the IID, second column is the age", default=None)
-    parser.add_argument("--map", help = "PLINK-formatted .map file.")
-    parser.add_argument("--directory", help = "directory name of the simulations. Must include the /")
+    parser.add_argument("-ibd", help = "IBD segment file. If multiple files for each chromosome, this is the path for chromosome 1.", required=True)
+    parser.add_argument("-fam", help="PLINK-formated .fam file")
+    parser.add_argument("-ages", help="Age file. First column is the IID, second column is the age", default="")
+    parser.add_argument("-map", help = "PLINK-formatted .map file.", default="")
+    parser.add_argument("-training", help = "Path and name of the 'degree' pkl file for training.", default="")
+    parser.add_argument("-out", help = "Output prefix.", default="Ponderosa")
     args = parser.parse_args()
     return args
 
-class Ponderosa:
+def get_file_names(file_name):
 
-    def __init__(self, ibd, map, ages):
+    if "chr1" in file_name:
+        return [file_name.replace("chr1", f"chr{chrom}") for chrom in range(1, 23)]
+    else:
+        return [file_name]
 
-        ### init ibd file
-        if "chr1" in ibd:
+''' SampleData is a class that holds a networkx graph where nodes are individuals
+and edges describe the relationship between those individuals. It can be queried easily
+using the get_edges and get_nodes functions, which allow the user to supply functions
+that act as conditionals for returning node pairs and nodes, resp.'''
+class SampleData:
 
-            self.ibd = pd.concat([pd.read_csv(ibd.replace("chr1", f"chr{chrom}"), delim_whitespace=True) for chrom in range(1, 23)])
+    def __init__(self, fam_file, **kwargs):
 
+        ### load the fam file
+        fam = pd.read_csv(fam_file, delim_whitespace=True, dtype=str, header=None)
+
+        ### init the graph and set defaults
+        g = nx.Graph()
+        g.add_nodes_from(fam.apply(lambda x: (x[1], {"sex": x[4],
+                                                    "mother": x[3] if x[3] != "0" else None,
+                                                    "father": x[2] if x[2] != "0" else None,
+                                                    "children": [],
+                                                    "age": np.nan}), axis=1).values)
+
+        # add the children
+        for sex_col in [2, 3]:
+            # assume that missing parent is coded as 0
+            for parent, children_df in fam[fam[sex_col] != "0"].groupby(sex_col):
+                # get a list of the children
+                children = children_df[1].values.tolist()
+                # add to attribute
+                nx.set_node_attributes(g, {parent: children}, "children")
+
+        # add age data
+        age_file = kwargs.get("age_file", "")
+        if os.path.exists(age_file):
+            ages = pd.read_csv(age_file, delim_whitespace=True, dtype={0: str, 1: float}, header=None)
+            age_attrs = {iid: age for iid, age in ages[[0,1]].values}
+            nx.set_node_attributes(g, age_attrs, "age")
         else:
-
-            self.ibd = pd.read_csv(ibd, delim_whitespace=True)
-
-        ### init ages
-        if ages != None:
-
-            self.ages = {iid: int(age) for iid, age in np.loadtxt(ages, dtype=str)}
-
-        else:
-
-            self.ages = {}
+            print("No age data has been provided.")
 
         ### get the genome len
-        if "chr1" in map:
+        map_file = kwargs.get("map_file", "")
+        if os.path.exists(map_file):
+            map_files = get_file_names(map_file)
 
-            self.l = 0
-            for chrom in range(1, 23):
-                tmp = pd.read_csv(map.replace("chr1", f"chr{chrom}"), delim_whitespace=True, header=None)[2].values
-                self.l += (tmp[-1] - tmp[0])
+            map_df = pd.concat([pd.read_csv(filen, delim_whitespace=True, header=None) for filen in map_files])
+
+            genome_len = 0
+            for chrom, chrom_df in map_df.groupby([0]):
+                genome_len += (chrom_df.iloc[-1][2] - chrom_df.iloc[0][2])
+        # no map files provided, use default genome length
+        else:
+            print("No map files have been provided.")
+            genome_len = 3500
+
+        ### load ibd, process ibd segs
+        ibd_file = kwargs.get("ibd_file", "")
+        if os.path.exists(ibd_file):
+            ibd_files = get_file_names(ibd_file)
+            # load ibd files
+            ibd_df = pd.concat([pd.read_csv(filen, delim_whitespace=True, dtype={"id1": str, "id2": str})
+                                for filen in ibd_files])
+
+            ibd_df["l"] = ibd_df["end_cm"] - ibd_df["start_cm"]
+
+            # iterate through the pairs of individuals, compute ibd stats
+            n_pairs = 0
+            for (id1, id2), pair_df in ibd_df.groupby(["id1", "id2"]):
+
+                # if distant relative or nodes not in the fam file, ignore
+                if ibd_df["l"].sum() < 10\
+                    or id1 not in g.nodes\
+                    or id2 not in g.nodes\
+                    or id1 == id2:
+                    continue
+
+                pair_ibd = ProcessSegments(pair_df)
+                ibd_data = pair_ibd.ponderosa_data(genome_len)
+
+                # set up the pedigree hierarchy, which will store the probs and info on how the probs were computed
+                hier = PedigreeHierarchy()
+                hier.set_attrs({i: np.nan for i in hier.init_nodes}, "p")
+                hier.set_attrs({i: np.nan for i in hier.init_nodes}, "post")
+                hier.set_attrs({i: None for i in hier.init_nodes}, "method")
+                hier.set_attrs({i: tuple(sorted([id1, id2])) for i in hier.init_nodes}, "ordering")
+                hier.set_attrs({i: "sorted" for i in hier.init_nodes}, "ordering_method")
+
+                # add ibd1 data and initialze probs
+                g.add_edge(id1, id2, ibd1=ibd_data.ibd1,
+                                     ibd2=ibd_data.ibd2,
+                                     h={id1: ibd_data.h1, id2: ibd_data.h2},
+                                     n=ibd_data.n,
+                                     k=(ibd_data.ibd1/2 + ibd_data.ibd2),
+                                     probs=hier)
+
+                n_pairs += 1
+                # if n_pairs > 10:
+                #     break
 
         else:
+            print("No IBD files have been provided.")
 
-            tmp = pd.read_csv(map, delim_whitespace=True, header=None)
-            self.l = sum([chrom_df[2].values[-1] - chrom_df[2].values[0] for chrom, chrom_df in tmp.groupby(0)])
+        self.g = g
 
-        ### process the ibd
-        self.ibd["l"] = self.ibd["end_cm"] - self.ibd["start_cm"]
+    # returns a list of node pair edges
+    # optional func arg is a function that takes as input the data dict and returns true if wanted
+    def get_edges(self, f=lambda x: True):
+        return [(id1, id2) for id1, id2, data in self.g.edges(data=True) if f(data)]
 
-        self.ibdnet = nx.Graph()
-        for pair, pair_df in self.ibd.groupby(["id1", "id2"]):
+    # returns a nested np array of [id1, id2, attr1, attr2, ...] for all edges that pass the function
+    def get_edge_data(self, attr_list, f=lambda x: True):
+        edges, out_attrs = [], []
+        for id1, id2, data in self.g.edges(data=True):
+            if f(data):
+                edges.append([id1, id2])
+                out_attrs.append([data[attr] for attr in attr_list])
+        return np.array(edges, dtype=str), np.array(out_attrs)
 
-            if pair_df["l"].sum() < 1000:
-                continue
+    # updates a bunch of edges at once
+    # edge_list looks like [(A, B), (B, C), (D, E)]
+    # attr_list looks like [1, 2, 3]
+    def update_edges(self, edge_list, attr_list, attr_name):
 
-            p = ProcessSegments(pair_df)
-            data = p.ponderosa_data(self.l)
+        attr_dict = {(id1, id2): attr for (id1, id2), attr in attr_list}
+        nx.set_edge_attributes(g, attr_dict, attr_name)
 
-            id1, id2 = pair
+    # same as above but returns a set of nodes
+    # e.g., get_nodes(lambda x: x["age"] > 90) returns all nodes that are >90 yo
+    def get_nodes(self, f=lambda x: True):
+        return [id1 for id1, data in self.g.nodes(data=True) if f(data)]
 
-            self.ibdnet.add_edge(id1, id2, ibd1 = data.ibd1, ibd2 = data.ibd2, h = {id1: data.h1, id2: data.h2}, n = data.n)
-
-        print("Done loading IBD")
-
-    def degree_classif(self, pkl_classifier):
-
-        f = open(pkl_classifier, "rb")
-        classif = pkl.load(f)
-
-        for id1, id2, data in self.ibdnet.edges(data=True):
-
-            # order is [FS, 2nd, 3rd, 4th]
-            p = classif.predict_proba([[data["ibd1"], data["ibd2"]]])
-
-            self.ibdnet.edges[id1, id2]["degree_p"] = p[0]
-
-    def n_classif(self, pkl_classifier):
-
-        f = open(pkl_classifier, "rb")
-        classif = pkl.load(f)
-
-        for id1, id2, data in self.ibdnet.edges(data=True):
-
-            if data["degree_p"][1] < 0.80:
-
-                self.ibdnet.edges[id1, id2]["n_p"] = [np.nan for _ in range(4)]
-
-                continue
-
-            p = classif.predict_proba([[data["n"], 0.5*data["ibd1"] + data["ibd2"]]])
-
-            self.ibdnet.edges[id1, id2]["n_p"] = p[0]
-
-        return list(classif.classes_)
-
-    def hsr_classif(self, pkl_classifier):
-
-        f = open(pkl_classifier, "rb")
-        classif = pkl.load(f)
-
-        for id1, id2, data in self.ibdnet.edges(data=True):
-
-            if data["degree_p"][1] < 0.80:
-
-                self.ibdnet.edges[id1, id2]["hsr_p"] = [np.nan for _ in range(4)]
-
-                continue
-
-            p = classif.predict_proba([[data["h"][id1], data["h"][id2]]])
-
-            self.ibdnet.edges[id1, id2]["hsr_p"] = p[0]
-
-        return list(classif.classes_)
-
-    def classify(self, directory):
-
-        self.degree_classif(f"{directory}degree_classifier.pkl")
-        hap_class = self.hsr_classif(f"{directory}hap_classifier.pkl")
-        nsegs_class = self.n_classif(f"{directory}nsegs_classifier.pkl")
-
-        output = []
-        for id1, id2, data in self.ibdnet.edges(data=True):
-
-            r = [id1, id2, data["ibd1"], data["ibd2"], data["h"][id1], data["h"][id2], data["n"]]
-            r += list(data["degree_p"])
-            r += list(data["hsr_p"])
-            r += list(data["n_p"])
-
-            output.append(r)
-
-        columns = ["id1", "id2", "ibd1", "ibd2", "h1", "h2", "n_segs"]
-        columns += ["FS", "2nd", "3rd", "4th"]
-        columns += hap_class
-        columns += nsegs_class
+    # update the hier probabilities
+    def update_probs(self, pair_list, probs_list, prob_labs, method):
+        # iterate through the probabilities
+        for (id1, id2), probs in zip(pair_list, probs_list):
+            self.g.edges[id1, id2]["probs"].set_attrs({i: p for i,p in zip(prob_labs, probs)}, "p")
+            self.g.edges[id1, id2]["probs"].set_attrs({i: method for i in prob_labs}, "method")
 
 
-        out = pd.DataFrame(output, columns=columns)
-        out.to_csv("Ponderosa_results.txt", index=False, sep="\t")
+def infer_second(id1, id2, pair_data, samples,
+                mhs_gap, gp_gap):
+
+    ### Re-compute probabilities based on phenotypic data (parents, age, etc)
+    hier_obj = pair_data["probs"]
+    hier = hier_obj.hier
+
+    # not PHS
+    if samples.nodes[id1]["father"] != None or samples.nodes[id2]["father"] != None:
+        hier.nodes["PHS"]["p"] = 0
+        hier.nodes["PHS"]["method"] = "pheno"
+    
+    # not MHS bc mother exists
+    if samples.nodes[id1]["mother"] != None or samples.nodes[id2]["mother"] != None:
+        hier.nodes["MHS"]["p"] = 0
+        hier.nodes["MHS"]["method"] = "pheno"
+
+    # get the age gap
+    age_gap = abs(samples.nodes[id1]["age"] - samples.nodes[id2]["age"])
+
+    # too far in age to be MHS
+    if age_gap > mhs_gap:
+        hier.nodes["MHS"]["p"] = 0
+        hier.nodes["MHS"]["method"] = "pheno"
+    
+    # too close in age to be GP
+    if age_gap < gp_gap:
+        hier.obj.set_attrs({"GP": 0, "MGP": 0, "PGP": 0}, "p")
+        hier_obj.set_attrs({i: "pheno" for i in ["GP", "MGP", "PGP"]}, "method")
+
+    # compute posterior probs for the n_segs
+    second_nodes = ["AV", "MGP", "PGP", "PHS", "MHS"]
+    prob_sum = sum([hier.nodes[i]["p"] for i in second_nodes])
+    hier_obj.set_attrs({i: prob_sum and hier.nodes[i]["p"] / prob_sum or 0 for i in second_nodes}, "p")
+
+    # need to reset the probabilities
+
+    # if hap score is not good, use HSR for GP/AV vs. HS
+    use_hap = hier.nodes["HS"]["p"] + hier.nodes["GP/AV"]["p"] >= 0.80
+    if not use_hap:
+        hier_obj.set_attrs({"HS": hier.nodes["PHS"]["p"] + hier.nodes["MHS"]["p"],
+                        "GP/AV": hier.nodes["MGP"]["p"] + hier.nodes["PGP"]["p"] + hier.nodes["AV"]["p"]}, "p")
+        hier_obj.set_attrs({"HS": "segs", "GP/AV": "segs"}, "method")
+
+    # update the PHS and MHS probs
+    p_hs = hier.nodes["PHS"]["p"] + hier.nodes["MHS"]["p"]
+    # prob of hs is zero, either bc of segments of pheno data (likely pheno data)
+    if p_hs == 0:
+        # there are parents present; the p(HS) is 0 and p(GPAV) is 1
+        if hier.nodes["PHS"]["method"] == "pheno" and hier.nodes["MHS"]["method"] == "pheno":
+            hier_obj.set_attrs({"HS": 0, "GP/AV": 1}, "p")
+            hier_obj.set_attrs({"HS": "pheno", "GP/AV": "pheno"}, "method")
+    else:
+        hier_obj.set_attrs({"PHS": hier.nodes["PHS"]["p"] / p_hs,
+                    "MHS": hier.nodes["MHS"]["p"] / p_hs}, "p")
+
+
+    # update the GP and AV probs
+    p_gpav = hier.nodes["MGP"]["p"] + hier.nodes["PGP"]["p"] + hier.nodes["AV"]["p"]
+    hier_obj.set_attrs({"GP": p_gpav and (hier.nodes["MGP"]["p"] + hier.nodes["PGP"]["p"]) / p_gpav or 0,
+                    "AV": p_gpav and hier.nodes["AV"]["p"] / p_gpav or 0}, "p")
+
+    # update the sex-specific GP probs
+    p_gp = hier.nodes["MGP"]["p"] + hier.nodes["PGP"]["p"]
+    hier_obj.set_attrs({"MGP": p_gp and hier.nodes["MGP"]["p"] / p_gp or 0,
+                    "PGP": p_gp and hier.nodes["PGP"]["p"] / p_gp or 0}, "p")
+
+    # iterate down the tree and compute the posterior prob
+    for parent, child in nx.bfs_edges(hier, "2nd"):
+        # posterior prob is the post prob of the parent times the conditional of the child
+        post = hier.nodes[parent]["p" if parent == "2nd" else "post"] *  hier.nodes[child]["p"]
+        # update the attribute
+        hier.nodes[child]["post"] = post
+
+        # need to order according to genetically youngest --> oldest
+        if child in ["GP", "MGP", "PGP", "AV", "GP/AV"]:
+            if samples.nodes[id1]["age"] > samples.nodes[id2]["age"]:
+                hier.nodes[child]["ordering"] = (id2, id1)
+                hier.nodes[child]["ordering_method"] = "age"
+            elif samples.nodes[id2]["age"] > samples.nodes[id1]["age"]:
+                    hier.nodes[child]["ordering"] = (id1, id2)
+                    hier.nodes[child]["ordering_method"] = "age"        
+            elif use_hap:
+                if samples.edges[id1, id2]["h"][id1] > samples.edges[id1, id2]["h"][id2]:
+                    hier.nodes[child]["ordering"] = (id1, id2)
+                    hier.nodes[child]["ordering_method"] = "hap"
+                else:
+                    hier.nodes[child]["ordering"] = (id2, id1)
+                    hier.nodes[child]["ordering_method"] = "hap"
+
+
 
 
 if __name__ == "__main__":
+
     args = parse_args()
 
-    p = Ponderosa(args.ibd, args.map, None)
-    p.classify(args.directory)
+    ### Samples is a SampleData obj that has all node and pairwise IBD information
+    Samples = SampleData(fam_file = args.fam,
+                         ibd_file = args.ibd,
+                         age_file = args.ages,
+                         map_file = args.map)
+
+    ### Training step
     
-    
-# p = Ponderosa("Himba_phasedibd_segments.txt", "../ponderosa/plink_data/newHimba_shapeit.chr1.map", None)
-# p.classify("ponderosa_pops/")
+    # True if there is already trained data; load the pickled training objs
+    if os.path.exists(args.training):
+
+        # load the degree classifier
+        # proba goes: [2nd, 3rd, 4th, FS]
+        infile = open(args.training, "rb")
+        degree_classfr = pkl.load(infile)
+
+        # load the n segs classifier
+        # probs go ['AV', 'MGP', 'MHS', 'PGP', 'PHS']
+        infile = open(args.training.replace("degree", "nsegs"), "rb")
+        nsegs_classfr = pkl.load(infile)
+
+        # load the hap classifier
+        # probs go ['GP/AV', 'HS', 'PhaseError']
+        infile = open(args.training.replace("degree", "hap"), "rb")
+        hap_classfr = pkl.load(infile)
 
 
-# # inputs
-# # h1, h2, tot_ibd, hscore_bool, age1, age2, N, dad1, mom1, dad2, dad2
-# # h_gmm, N_lda
+    ### Classification steps
 
-# with open('/Users/cole/Desktop/brown/ponderosa/test_lda.pkl', 'rb') as f:
-#     N_lda = pkl.load(f)
+    ### Classification step 1: degree of relatedness
 
-# with open('/Users/cole/Desktop/brown/ponderosa/test_gmm.pkl', 'rb') as f:
-#     h_gmm = pkl.load(f)
+    # get the input data; X has the following cols: id1, id2, ibd1, ibd2
+    edges, X_degree = Samples.get_edge_data(["ibd1", "ibd2"], lambda x: 0.05 < x["k"] < 0.45)
+    degree_probs = degree_classfr.predict_proba(X_degree)
 
 
-# def get_probs(h1, h2, tot_cov, N):
-#     return N_lda.predict_proba([[tot_cov, N]])[0], h_gmm.predict_proba([[h1, h2]])[0]
+    # add the classification probs
+    Samples.update_probs(edges, degree_probs, degree_classfr.classes_, "ibd")
 
+    ### Classification step 2: n of segs
+    edges, X_n = Samples.get_edge_data(["n", "k"], lambda x: x["probs"].hier.nodes["2nd"]["p"] > 0.80)
+    n_probs = nsegs_classfr.predict_proba(X_n)
 
-# ### age functions
+    # add the n probs
+    Samples.update_probs(edges, n_probs, nsegs_classfr.classes_, "segs")
 
-# # returns the Pr of being GP versus AV using age data
-# def GPAV_ages(age1, age2):
-#     if abs(age1 - age2) < 30:
-#         return 0
-#     return 0.5
+    ### Classification step 3: haps
+    edges, X_hap = Samples.get_edge_data(["h"], lambda x: x["probs"].hier.nodes["2nd"]["p"] > 0.80)
 
-# # returns the Pr of being PHS versus MHS using age data
-# def HS_ages(age1, age2):
-#     if abs(age1 - age2) > 35:
-#         return 1
-#     return 0.5
-    
+    # retrieve h1 and h2 values and predict the probs
+    haps = [[h[0][id1], h[0][id2]] for (id1, id2), h in zip(edges, X_hap)]
+    h_probs = hap_classfr.predict_proba(haps)
 
+    # update the hap probs
+    # get the index of the GPAV and HS classes
+    class_index = np.where(hap_classfr.classes_ != "PhaseError")[0]
+    Samples.update_probs(edges, h_probs[:,class_index], hap_classfr.classes_[class_index] , "hap")
 
+    ### Inference steps
 
-# ### calculates Pr(HS); 1 - Pr(HS) = Pr(GP or AV)
-# def pr_HS(hscore_bool, h_probs, N_probs, dad1, mom1, dad2, mom2, age1, age2):
-#     # hscore_bool True tells us to use the h classifier
-#     if hscore_bool:
-#         # recalculate the probabilities
-#         h_probs = h_probs[:3] / sum(h_probs[:3])
-#         pr_hs = h_probs[2]
-#     # not using h1, h2 here so we use the N classifier
-#     else:
-#         # if both of the following if statements are true, they can't be HS; this variable keeps track of that
-#         n = 0
-#         # if they can't be MHS, then the Pr of HS from the classifier just uses the PHS component
-#         if mom1 or mom2:
-#             pr_hs = N_probs[4] / (1 - N_probs[2])
-#             n += 1
-#         # same logic as above, but can't be PHS
-#         if dad1 or dad2:
-#             pr_hs = N_probs[2] / (1 - N_probs[4])
-#             n += 1
-#         # both statements are true; they cannot be HS
-#         if n > 1:
-#             pr_hs = 0
-#         # if none of the statements are true, weight the probabilities by age probabilities
-#         if n == 0:
-#             pr_PHS_age = HS_ages(age1, age2) # prob of being PHS vs. MHS using age data only
-#             pr_PHS_N = N_probs[4] # prob of being PHS sharing N segs
-#             pr_MHS_N = N_probs[2]
-#             # created a step function that peaks at Pr(MHS | N) + Pr(PHS | N) when pr_PHS_age = pr_MHS_age = 0.5
-#             # otherwise weights it such taht Pr(HS) = Pr(PHS | N) when Pr(MHS | age) --> 0
-#             if pr_PHS_age <= 0.5:
-#                 pr_hs = (2 * pr_PHS_N * pr_PHS_age) + pr_MHS_N
-#             else:
-#                 pr_hs = (-2 * pr_MHS_N * pr_PHS_age) + (2 * pr_MHS_N) + pr_PHS_N
-#     # return HS prob
-#     return pr_hs
+    second_pairs = edges
 
-# # calculates the prob that they are PHS given they are HS; this equals 1 - Pr(MHS)
-# # use existing parent data, ages, and lastly the number of segments to determine this
-# def pr_PHS(N_probs, age1, age2, dad1, mom1, dad2, mom2):
-#     # if one of them has a father, then Pr(PHS) = 0
-#     if dad1 or dad2:
-#         return 0
-#     # if one of them has a mother, then Pr(MHS) = 0
-#     if mom1 or mom2:
-#         return 1
-#     # from N, the prob of being PHS
-#     pr_PHS_N = N_probs[4] / (N_probs[2] + N_probs[4])
-#     # rescale the pr_PHS_N with the age prob
-#     pr_PHS_age = HS_ages(age1, age2)
-#     # get the prob of being MHS
-#     pr_MHS = (1 - pr_PHS_N) * (1 - pr_PHS_age)
-#     # return the rescaled prob of being PHS
-#     return (pr_PHS_N * pr_PHS_age) / ((pr_PHS_N * pr_PHS_age) + pr_MHS)
+    # hold the hier objects
+    out_hiers = {}
 
-# # calculates the prob of the pair being GP given they are GP or AV; this is 1 - Pr(AV)
-# def pr_GP(N_probs, age1, age2):
-#     # first use the function GPAV_ages to calculate the prob of being GP (versus AV) based on the ages
-#     pr_GP_age = GPAV_ages(age1, age2)
-#     # next take the prob of being GP using N, which is [Pr(MGP) + Pr(PGP)] / Pr(GP or AV)
-#     pr_GP_N = (N_probs[1] + N_probs[3]) / (N_probs[0] + N_probs[1] + N_probs[3])
-#     # multiply the complement of the probabilities from above to get the Pr of being avuncular
-#     pr_AV = (1 - pr_GP_age) * (1 - pr_GP_N)
-#     # return the prob of being GP
-#     return (pr_GP_age * pr_GP_N) / ((pr_GP_age * pr_GP_N) + pr_AV)
+    # iterate through the pairs
+    for id1, id2 in second_pairs:
 
-# ### calculates the prob that ID1 is the grandparent of ID2 given they are GP
-# def pr_GP1(hscore_bool, h_gmm, mom1, dad1, dad2, mom2, age1, age2):
-#     # if using the haplotype score
-#     if hscore_bool:
-#         # Pr(GP1) / [Pr(GP1) + Pr(GP2)]
-#         return h_gmm[0] / sum(h_gmm[:2])
-#     # ID2 has both parents in dataset, so ID1 can't be their grandparent
-#     if dad2 and mom2:
-#         return 0
-#     # ID1 has both parents in the dataset, so ID1 must be the grandparent
-#     if dad1 and mom1:
-#         return 1
-#     # ID1 is older than ID2 --> ID1 must be grandparent
-#     if age1 > age2 or age2 < 30:
-#         return 1
-#     # ID2 is older than ID1 --> ID1 cant be grandparent
-#     if age1 < age2 or age1 < 30:
-#         return 0
-#     # if no other information, set the prob to 1/2
-#     return 0.5
+        # get the pair data
+        pair_data = Samples.g[id1][id2].copy()
 
-# # returns prob of ID1 being the uncle/aunt of ID2 given they are AV
-# def pr_AV1(hscore_bool, h_probs, age1, age2, mom1, dad1, mom2, dad2, use_age):
-#     # use the haplotype scores if possible
-#     if hscore_bool:
-#         return h_probs[0] / sum(h_probs[:2])
-#     # ID1 has both parents in the dataset so it must be the aunt/uncle
-#     if dad1 and mom1:
-#         return 1
-#     # ID2 has both parents in the dataset, so ID1 can't be the aunt/uncle
-#     if dad2 and mom2:
-#         return 0
-#     if age1 > age2 and use_age:
-#         return 1
-#     if age1 < age2 and use_age:
-#         return 0
-#     # there's no other information
-#     return 0.5
+        # infer the relationship
+        rel = infer_second(id1, id2, pair_data, Samples.g, 30, 30)
 
-# # returns Pr of the given GP being a paternal grandparent
-# def pr_PGP(N_probs, gc_dad, gc_mom):
-#     # grandchild has a dad in the dataset, so can't be a paternal grandparent
-#     if gc_dad:
-#         return 0
-#     # grandchild has a mom in the dataset, so must be a maternal grandparent
-#     if gc_mom:
-#         return 1
-#     # otherwise use the IBD segments
-#     return N_probs[3] / (N_probs[1] + N_probs[3])
+        out_hiers[(id1, id2)] = pair_data["probs"].hier
 
-
-
-
-    
-# h1, h2 = 0.65, 0.65
-# N = 80
-# dad1, mom1 = False, False
-# dad2, mom2 = False, False
-# age1 = 39
-# age2 = 50
-# tot_cov = 1800
-# id1, id2 = "A", "B"
-
-# N_probs, h_probs = get_probs(h1, h2, tot_cov, N)
-
-# def probs(id1, id2, N_probs, h_probs, h1, h2, N, dad1, mom1, dad2, mom2, age1, age2):
-    
-#     # boolean decides if the h classifier should be used
-#     hscore_bool = h_probs[3] < 0.5
-
-#     # calculates each of the conditional probabilities
-#     HS = pr_HS(hscore_bool, h_probs, N_probs, dad1, mom1, dad2, mom2, age1, age2)
-#     PHS_HS = pr_PHS(N_probs, age1, age2, dad1, mom1, dad2, mom2)
-#     GP_GPAV = pr_GP(N_probs, age1, age2)
-#     AV1_AV = pr_AV1(hscore_bool, h_probs, age1, age2, dad1, mom1, dad2, mom2, True)
-#     GP1_GP = pr_GP1(hscore_bool, h_probs, dad1, mom1, dad2, mom2, age1, age2)
-#     PGP1_GP1 = pr_PGP(N_probs, dad2, mom2)
-#     PGP2_GP2 = pr_PGP(N_probs, dad1, mom1)
-
-#     # creates the graph network to store the probabilities
-#     tree = nx.DiGraph()
-#     tree.add_node("2nd", P = 1)
-
-#     # the edges in the tree and the associated probabilities
-#     edges = [["2nd", "HS", HS], ["2nd", "GP/AV", 1 - HS],
-#             ["HS", "PHS", PHS_HS], ["HS", "MHS", 1 - PHS_HS], ["GP/AV", "GP", GP_GPAV], ["GP/AV", "AV", 1 - GP_GPAV],
-#             ["GP", "GP1", GP1_GP], ["GP", "GP2", 1 - GP1_GP], ["AV", "AV1", AV1_AV], ["AV", "AV2", 1 - AV1_AV],
-#             ["GP1", "PGP1", PGP1_GP1], ["GP1", "MGP1", 1 - PGP1_GP1], ["GP2", "PGP2", PGP2_GP2], ["GP2", "MGP2", 1 - PGP2_GP2]]
-
-#     # for each edge, add the child node and its prob by taking the probability assoc. with the edge and multiplying by the Pr of the parent node
-#     for node1, node2, p in edges:
-#         tree.add_edge(node1, node2)
-#         tree.nodes[node2]["P"] = tree.nodes[node1]["P"] * p
-
-#     # output the data
-#     row = [id1, id2, h1, h2, N, age1, age2]
-#     col_names = ["ID1", "ID2", "H1", "H2", "N", "AGE1", "AGE2", "90%", "90%_p", "75%", "75%_p", "50%", "50%_p"]
-
-#     # give the most specific relationship whose likelihood is above b
-#     for p in [0.9, 0.75, 0.5]:
-#         rel_prob, rel = sorted(([[1, "2nd"]]+[[tree.nodes[node]["P"], node] for _, node in nx.bfs_edges(tree, "2nd") if tree.nodes[node]["P"] >= p])[::-1], key = lambda x: x[0])[0]
-#         row += [rel, round(rel_prob, 3)]
-#     row += [round(tree.nodes[node]["P"], 3) for _, node in nx.bfs_edges(tree, "2nd")]
-#     col_names += [node for _, node in nx.bfs_edges(tree, "2nd")]
-#     return pd.DataFrame([row], columns = col_names)
-
-# print(probs(id1, id2, N_probs, h_probs, h1, h2, N, dad1, mom1, dad2, mom2, age1, age2))
+    # write out a pickle object of the results
+    outf = open(f"{args.out}_results.pkl", "wb")
+    pkl.dump(out_hiers, outf)
+    outf.close()

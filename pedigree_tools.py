@@ -346,6 +346,12 @@ class PedigreeHierarchy:
     # given a list of relationship nodes, returns all pairs under
     def get_pairs_from_list(self, node_list):
         return set(it.chain(*[self.get_pairs(node) for node in node_list]))
+
+    # adds a single attributes to the nodes in the dict
+    # attrs is a dict like {rel1: attr1, rel2: attr2} and attr_name is the name of the attr
+    def set_attrs(self, attrs, attr_name):
+        for node, attr in attrs.items():
+            self.hier.nodes[node][attr_name] = attr
         
     # returns the hierarchy structure
     def get_hierarchy(self):
