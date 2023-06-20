@@ -117,8 +117,8 @@ class SampleData:
                                      probs=hier)
 
                 n_pairs += 1
-                # if n_pairs > 10:
-                #     break
+                if n_pairs > 10:
+                    break
 
         else:
             print("No IBD files have been provided.")
