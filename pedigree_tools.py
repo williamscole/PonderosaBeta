@@ -307,7 +307,11 @@ class PedigreeHierarchy:
         
         # no specified hierarchy supplied
         if len(hier) == 0:
-            hier = [["1st", "PO"],
+            hier = [["relatives", "1st"],
+                    ["relatives", "2nd"],
+                    ["relatives", "3rd"],
+                    ["relatives", "4th"],
+                    ["1st", "PO"],
                     ["1st", "FS"],
                     ["2nd", "GP/AV"],
                     ["GP/AV", "GP"],
@@ -369,6 +373,9 @@ class TrainPonderosa:
         
         # stores if real data
         self.read_data = real_data
+
+        # get the name of the population
+        self.popln = kwargs.get("population", "pop1")
         
         # if using real data, there are additional kwargs
         if real_data:
@@ -378,7 +385,8 @@ class TrainPonderosa:
         else:
             # load the simulated segments
             segment_files = os.listdir("segments/")
-            sim_df = pd.concat([pd.read_feather(f"segments/{i}") for i in segment_files])
+            # only take the segment file for the population
+            sim_df = pd.concat([pd.read_feather(f"segments/{i}") for i in segment_files if i.split("_")[1] == self.popln])
 
             # get the genome len
             pop = sim_df["pop"].values[0]
@@ -526,19 +534,19 @@ class TrainPonderosa:
 
         ### hap classifier
         hap_classif = self.hap_classifier()
-        f = open(f"{directory}hap_classifier.pkl", "wb")
+        f = open(f"{directory}hap_classifier_{self.popln}.pkl", "wb")
         pkl.dump(hap_classif, f)
         f.close()
 
         ### n segs classifier
         nsegs_classif = self.nsegs_classifier()
-        f = open(f"{directory}nsegs_classifier.pkl", "wb")
+        f = open(f"{directory}nsegs_classifier_{self.popln}.pkl", "wb")
         pkl.dump(nsegs_classif, f)
         f.close()
 
         ### degree classifier
         degree_classif = self.degree_classifier()
-        f = open(f"{directory}degree_classifier.pkl", "wb")
+        f = open(f"{directory}degree_classifier_{self.popln}.pkl", "wb")
         pkl.dump(degree_classif, f)
         f.close()
         

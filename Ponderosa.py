@@ -13,7 +13,11 @@ def parse_args():
     parser.add_argument("-ages", help="Age file. First column is the IID, second column is the age", default="")
     parser.add_argument("-map", help = "PLINK-formatted .map file.", default="")
     parser.add_argument("-training", help = "Path and name of the 'degree' pkl file for training.", default="")
+    parser.add_argument("-populations", help="Path and file name of .txt file where col1 is the IID and col2 is their population.", default="")
+    parser.add_argument("-population", help="If -populations is used, this will specify which population to run Ponderosa on.", default="pop1")
     parser.add_argument("-out", help = "Output prefix.", default="Ponderosa")
+    parser.add_argument("-min_p", help="Minimum posterior probability to output the relationship.", default=0.8)
+    parser.add_argument("-n_pairs", help="Max number of pairs to look at. Default: all", default=np.inf, type=float)
     args = parser.parse_args()
     return args
 
@@ -41,7 +45,11 @@ class SampleData:
                                                     "mother": x[3] if x[3] != "0" else None,
                                                     "father": x[2] if x[2] != "0" else None,
                                                     "children": [],
-                                                    "age": np.nan}), axis=1).values)
+                                                    "age": np.nan,
+                                                    "pop": "pop1"}), axis=1).values)
+
+        ### get the population
+        popln = kwargs.get("population", "pop1")
 
         # add the children
         for sex_col in [2, 3]:
@@ -51,6 +59,13 @@ class SampleData:
                 children = children_df[1].values.tolist()
                 # add to attribute
                 nx.set_node_attributes(g, {parent: children}, "children")
+
+        # add the population data
+        pop_file = kwargs.get("pop_file", "")
+        if os.path.exists(pop_file):
+            pops = pd.read_csv(pop_file, delim_whitespace=True, dtype=str, header=None)
+            pop_attrs = {iid: pop for iid, pop in pops[[0,1]].values}
+            nx.set_node_attributes(g, pop_attrs, "pop")
 
         # add age data
         age_file = kwargs.get("age_file", "")
@@ -79,6 +94,7 @@ class SampleData:
         ### load ibd, process ibd segs
         ibd_file = kwargs.get("ibd_file", "")
         if os.path.exists(ibd_file):
+            print("Processing IBD segments...")
             ibd_files = get_file_names(ibd_file)
             # load ibd files
             ibd_df = pd.concat([pd.read_csv(filen, delim_whitespace=True, dtype={"id1": str, "id2": str})
@@ -88,13 +104,16 @@ class SampleData:
 
             # iterate through the pairs of individuals, compute ibd stats
             n_pairs = 0
+            tot_pairs = len([1 for _ in ibd_df.groupby(["id1", "id2"])])
             for (id1, id2), pair_df in ibd_df.groupby(["id1", "id2"]):
 
                 # if distant relative or nodes not in the fam file, ignore
-                if ibd_df["l"].sum() < 10\
+                if ibd_df["l"].sum() < 450\
                     or id1 not in g.nodes\
                     or id2 not in g.nodes\
-                    or id1 == id2:
+                    or id1 == id2\
+                    or g.nodes[id1]["pop"] != popln\
+                    or g.nodes[id2]["pop"] != popln:
                     continue
 
                 pair_ibd = ProcessSegments(pair_df)
@@ -107,6 +126,8 @@ class SampleData:
                 hier.set_attrs({i: None for i in hier.init_nodes}, "method")
                 hier.set_attrs({i: tuple(sorted([id1, id2])) for i in hier.init_nodes}, "ordering")
                 hier.set_attrs({i: "sorted" for i in hier.init_nodes}, "ordering_method")
+                # set the root post prob to 1
+                hier.hier.nodes["relatives"]["post"] = 1
 
                 # add ibd1 data and initialze probs
                 g.add_edge(id1, id2, ibd1=ibd_data.ibd1,
@@ -116,8 +137,15 @@ class SampleData:
                                      k=(ibd_data.ibd1/2 + ibd_data.ibd2),
                                      probs=hier)
 
+                # check to see if parents
+                if ibd_data.ibd1 > 0.75:
+                    hier.set_attrs({"1st": 1, "PO": 1, "FS": 0}, "p")
+
                 n_pairs += 1
-                if n_pairs > 10:
+                if n_pairs % 100 == 0:
+                    print(f"{n_pairs} of {tot_pairs} pairs processed.")
+
+                if n_pairs > kwargs.get("n_pairs", np.inf):
                     break
 
         else:
@@ -151,6 +179,12 @@ class SampleData:
     # e.g., get_nodes(lambda x: x["age"] > 90) returns all nodes that are >90 yo
     def get_nodes(self, f=lambda x: True):
         return [id1 for id1, data in self.g.nodes(data=True) if f(data)]
+    
+    def get_subset(self, f):
+        # get the nodes based on the conditional f
+        node_subset = self.get_nodes(f)
+        # return the subset for which the conditional is true
+        return self.g.subgraph(set(node_subset))
 
     # update the hier probabilities
     def update_probs(self, pair_list, probs_list, prob_labs, method):
@@ -171,11 +205,13 @@ def infer_second(id1, id2, pair_data, samples,
     if samples.nodes[id1]["father"] != None or samples.nodes[id2]["father"] != None:
         hier.nodes["PHS"]["p"] = 0
         hier.nodes["PHS"]["method"] = "pheno"
+        hier.nodes["MHS"]["method"] = "pheno"
     
     # not MHS bc mother exists
     if samples.nodes[id1]["mother"] != None or samples.nodes[id2]["mother"] != None:
         hier.nodes["MHS"]["p"] = 0
         hier.nodes["MHS"]["method"] = "pheno"
+        hier.nodes["PHS"]["method"] = "pheno"
 
     # get the age gap
     age_gap = abs(samples.nodes[id1]["age"] - samples.nodes[id2]["age"])
@@ -184,10 +220,11 @@ def infer_second(id1, id2, pair_data, samples,
     if age_gap > mhs_gap:
         hier.nodes["MHS"]["p"] = 0
         hier.nodes["MHS"]["method"] = "pheno"
+        hier.nodes["PHS"]["method"] = "pheno"
     
     # too close in age to be GP
     if age_gap < gp_gap:
-        hier.obj.set_attrs({"GP": 0, "MGP": 0, "PGP": 0}, "p")
+        hier_obj.set_attrs({"GP": 0, "MGP": 0, "PGP": 0}, "p")
         hier_obj.set_attrs({i: "pheno" for i in ["GP", "MGP", "PGP"]}, "method")
 
     # compute posterior probs for the n_segs
@@ -229,10 +266,6 @@ def infer_second(id1, id2, pair_data, samples,
 
     # iterate down the tree and compute the posterior prob
     for parent, child in nx.bfs_edges(hier, "2nd"):
-        # posterior prob is the post prob of the parent times the conditional of the child
-        post = hier.nodes[parent]["p" if parent == "2nd" else "post"] *  hier.nodes[child]["p"]
-        # update the attribute
-        hier.nodes[child]["post"] = post
 
         # need to order according to genetically youngest --> oldest
         if child in ["GP", "MGP", "PGP", "AV", "GP/AV"]:
@@ -250,7 +283,26 @@ def infer_second(id1, id2, pair_data, samples,
                     hier.nodes[child]["ordering"] = (id2, id1)
                     hier.nodes[child]["ordering_method"] = "hap"
 
+def readable_results(results, min_p):
 
+    out_results = []
+    for (id1, id2), hier in results.items():
+        # get all relatives who have >min_p probability; sort by largest --> smallest depth; take relative with largest depth
+        deepest_rel = sorted([[len(nx.shortest_path(hier, "relatives", i)), i] for i in nx.dfs_preorder_nodes(hier, "relatives")\
+                if hier.nodes[i]["post"] > min_p], key=lambda x: x[0])[-1][1]
+        
+        # get the degree of relative
+        degree = nx.shortest_path(hier, "relatives", deepest_rel)[1] if deepest_rel != "relatives" else "relatives"
+        
+        rel_data = hier.nodes[deepest_rel]
+
+        row = list(rel_data["ordering"]) + [rel_data[col] for col in ["ordering_method", "post", "p", "method"]] + [deepest_rel, degree]
+        row += [hier.nodes["pair_data"]["ibd1"], hier.nodes["pair_data"]["ibd2"]]
+        out_results.append(row)
+
+    results_df = pd.DataFrame(out_results, columns=["id1", "id2", "order_method", "posterior", "conditional", "method", "relationship", "degree", "ibd1", "ibd2"])
+    
+    return results_df.round(4)
 
 
 if __name__ == "__main__":
@@ -258,10 +310,13 @@ if __name__ == "__main__":
     args = parse_args()
 
     ### Samples is a SampleData obj that has all node and pairwise IBD information
-    Samples = SampleData(fam_file = args.fam,
-                         ibd_file = args.ibd,
-                         age_file = args.ages,
-                         map_file = args.map)
+    Samples = SampleData(fam_file= args.fam,
+                         ibd_file=args.ibd,
+                         age_file=args.ages,
+                         map_file=args.map,
+                         pop_file=args.populations,
+                         population=args.population,
+                         n_pairs=args.n_pairs)
 
     ### Training step
     
@@ -283,15 +338,11 @@ if __name__ == "__main__":
         infile = open(args.training.replace("degree", "hap"), "rb")
         hap_classfr = pkl.load(infile)
 
-
-    ### Classification steps
-
     ### Classification step 1: degree of relatedness
 
     # get the input data; X has the following cols: id1, id2, ibd1, ibd2
     edges, X_degree = Samples.get_edge_data(["ibd1", "ibd2"], lambda x: 0.05 < x["k"] < 0.45)
     degree_probs = degree_classfr.predict_proba(X_degree)
-
 
     # add the classification probs
     Samples.update_probs(edges, degree_probs, degree_classfr.classes_, "ibd")
@@ -317,23 +368,45 @@ if __name__ == "__main__":
 
     ### Inference steps
 
-    second_pairs = edges
-
     # hold the hier objects
     out_hiers = {}
 
     # iterate through the pairs
-    for id1, id2 in second_pairs:
+    for id1, id2, data in Samples.g.edges(data=True):
 
         # get the pair data
-        pair_data = Samples.g[id1][id2].copy()
+        pair_data = data.copy()
 
-        # infer the relationship
-        rel = infer_second(id1, id2, pair_data, Samples.g, 30, 30)
+        # infer the rel if second
+        if pair_data["probs"].hier.nodes["2nd"]["p"] > 0.80:
+            infer_second(id1, id2, pair_data, Samples.g, 30, 30)
 
-        out_hiers[(id1, id2)] = pair_data["probs"].hier
+        hier = pair_data["probs"].hier
+
+        # percolate the probabilities down the tree
+        for parent, child in nx.bfs_edges(hier, "relatives"):
+            # posterior prob is the post prob of the parent times the conditional of the child
+            post = hier.nodes[parent]["post"] *  hier.nodes[child]["p"]
+            # update the attribute
+            hier.nodes[child]["post"] = post
+
+        # add the pair data as a node with attributes
+        hier.add_node("pair_data",
+                      h=pair_data["h"],
+                      n=pair_data["n"],
+                      ibd1=pair_data["ibd1"],
+                      ibd2=pair_data["ibd2"])
+        
+        # add the ids as nodes so you can get the pair info
+        hier.add_nodes_from(Samples.g.subgraph({id1, id2}).nodes(data=True))
+
+        out_hiers[(id1, id2)] = hier
 
     # write out a pickle object of the results
     outf = open(f"{args.out}_results.pkl", "wb")
     pkl.dump(out_hiers, outf)
     outf.close()
+
+    # get the readable results df
+    results_df = readable_results(out_hiers, args.min_p)
+    results_df.to_csv(f"{args.out}_results.txt", sep="\t", index=False)
