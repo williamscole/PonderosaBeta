@@ -121,7 +121,7 @@ class SampleData:
             for (id1, id2), pair_df in ibd_df.groupby(["id1", "id2"]):
 
                 # if distant relative or nodes not in the fam file, ignore
-                if ibd_df["l"].sum() < 400\
+                if ibd_df["l"].sum() < 100\
                     or id1 not in g.nodes\
                     or id2 not in g.nodes\
                     or id1 == id2\
