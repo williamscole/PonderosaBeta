@@ -315,6 +315,7 @@ class PedigreeHierarchy:
                     ["relatives", "2nd"],
                     ["relatives", "3rd"],
                     ["relatives", "4th"],
+                    ["relatives", "MZ"],
                     ["1st", "PO"],
                     ["1st", "FS"],
                     ["2nd", "GP/AV"],
@@ -353,6 +354,9 @@ class PedigreeHierarchy:
     # given a relationship, returns the the relative pairs under that relationship
     # pairs is True --> returns paired tuples; pairs is False --> returns relative nodes
     def get_nodes(self, node):
+        return nx.descendants(self.hier, node) - self.init_nodes
+
+    def get_pairs(self, node):
         return nx.descendants(self.hier, node) - self.init_nodes
 
     def get_relative_nodes(self, node, include=False):
