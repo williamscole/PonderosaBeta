@@ -4,7 +4,12 @@ import pickle as pkl
 import networkx as nx
 import argparse
 import os
-from pedigree_tools import ProcessSegments, PedigreeHierarchy
+from math import floor, ceil
+import itertools as it
+from sklearn.mixture import GaussianMixture
+from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+
+from pedigree_tools import ProcessSegments, PedigreeHierarchy, SiblingClassifier, TrainPonderosa
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -16,11 +21,16 @@ def parse_args():
     parser.add_argument("-populations", help="Path and file name of .txt file where col1 is the IID and col2 is their population.", default="")
     parser.add_argument("-population", help="If -populations is used, this will specify which population to run Ponderosa on.", default="pop1")
     parser.add_argument("-out", help = "Output prefix.", default="Ponderosa")
-    parser.add_argument("-min_p", help="Minimum posterior probability to output the relationship.", default=0.8)
+    parser.add_argument("-min_p", help="Minimum posterior probability to output the relationship.", default=0.8, type=float)
     parser.add_argument("-n_pairs", help="Max number of pairs to look at. Default: all", default=np.inf, type=float)
+    parser.add_argument("-debug", action="store_true")
     args = parser.parse_args()
     return args
 
+''' Ponderosa can take as input a file (e.g., containing IBD segments) that has all chromosomes
+represented, in which case it does not expect chr1 to be in the file name. Otherwise, if the files
+are split by chromosome, the user should supply the path and file name for chromosome 1, in which
+case the chromosome number should be denoted as chr1'''
 def get_file_names(file_name):
 
     if "chr1" in file_name:
@@ -91,6 +101,9 @@ class SampleData:
             print("No map files have been provided.")
             genome_len = 3500
 
+        # store the genome_len
+        self.genome_len = genome_len
+
         ### load ibd, process ibd segs
         ibd_file = kwargs.get("ibd_file", "")
         if os.path.exists(ibd_file):
@@ -108,7 +121,7 @@ class SampleData:
             for (id1, id2), pair_df in ibd_df.groupby(["id1", "id2"]):
 
                 # if distant relative or nodes not in the fam file, ignore
-                if ibd_df["l"].sum() < 450\
+                if ibd_df["l"].sum() < 400\
                     or id1 not in g.nodes\
                     or id2 not in g.nodes\
                     or id1 == id2\
@@ -128,6 +141,7 @@ class SampleData:
                 hier.set_attrs({i: "sorted" for i in hier.init_nodes}, "ordering_method")
                 # set the root post prob to 1
                 hier.hier.nodes["relatives"]["post"] = 1
+                hier.hier.nodes["relatives"]["p"] = 1
 
                 # add ibd1 data and initialze probs
                 g.add_edge(id1, id2, ibd1=ibd_data.ibd1,
@@ -135,7 +149,8 @@ class SampleData:
                                      h={id1: ibd_data.h1, id2: ibd_data.h2},
                                      n=ibd_data.n,
                                      k=(ibd_data.ibd1/2 + ibd_data.ibd2),
-                                     probs=hier)
+                                     probs=hier,
+                                     segments=pair_df)
 
                 # check to see if parents
                 if ibd_data.ibd1 > 0.75:
@@ -152,6 +167,7 @@ class SampleData:
             print("No IBD files have been provided.")
 
         self.g = g
+
 
     # returns a list of node pair edges
     # optional func arg is a function that takes as input the data dict and returns true if wanted
@@ -194,6 +210,221 @@ class SampleData:
             self.g.edges[id1, id2]["probs"].set_attrs({i: method for i in prob_labs}, "method")
 
 
+class Pedigree:
+    '''Takes as input a networkx graph where nodes have attributes:
+        children: list
+        father: str (None if missing)
+        mother: str (None if missing)
+        age: float (np.nan if missing)
+        sex: str ("1" if male "2" if female)'''
+    def __init__(self, g, degree_classifier=None):
+
+        # specify the relationships
+        # rels = {"relatives": ["1st", "2nd", "3rd", "4th"],
+        #         "1st": ["PO", "FS"], "2nd": ["HS", "GPAV", "DCO"], "3rd": ["CO", "GGP", "HAV", "DHCO"], "4th": ["HCO", "GGGP"], "GPAV": ["GP", "AV"],
+        #         "GP": ["MGP", "PGP"], "HS": ["MHS", "PHS"]}
+
+        # init pedigree obj to store the relationships
+        # self.rels = PedigreeHierarchy(hier=list(it.chain(*[[[parent, child] for child in child_l] for parent, child_l in rels.items()])))
+        self.pairs = PedigreeHierarchy()
+        # set attributes 
+        # self.rels.set_attrs({i: set() for i in self.rels.get_nodes("relatives")}, "pairs")
+
+        # pedigree object is a directed graph which directs parent --> child
+        ped = nx.DiGraph()
+        ped.add_nodes_from(g.nodes)
+
+        # iterate through the nodes in the input graph and add their parental edges
+        for node, attrs in g.nodes(data=True):
+            # info about their relatives
+            mother = attrs["mother"]; father = attrs["father"]; children = attrs["children"]
+
+            # age and sex info
+            age = attrs["age"]; sex = attrs["sex"]
+
+            # set attrs
+            ped.nodes[node]["age"] = age
+            ped.nodes[node]["sex"] = sex
+
+            # list of all the PO relationships to add
+            po_list = [[father, node], [mother, node]] + [[node, child] for child in children]
+
+            # iterate through the list
+            for parent, child in po_list:
+                # add the nodes; parent node may be None, in which case it is renamed to "remove"
+                ped.add_edge({parent: parent, None: "remove"}[parent], child)
+
+        # remove the remove dummy node and assign to the class
+        self.dummy, self.ped = SiblingClassifier(ped.subgraph(set(ped.nodes) - {"remove"}), g, 0, degree_classifier)
+
+
+    # adds a pair to a relationship category
+    def add_pair(self, id1, id2, rel):
+        # add the pair
+        self.pairs.add_relative(rel, (id1, id2))
+        # self.rels.hier.nodes[rel]["pairs"] |= {(id1, id2)}
+
+    def find_relationship(self, paths):
+        # keeps all of the legal paths
+        out_paths = []
+
+        # iterate through the paths
+        for path in paths:
+
+            # self looping path
+            if len(path) == 1:
+                continue
+
+            # path_dir describes the path between the two nodes. 1 indicates moving up the ped, -1 indicates moving down the ped
+            path_dir = [1 if self.ped.get_edge_data(path[i], path[i+1]) == None else -1 for i in np.arange(len(path)-1)]
+
+            # is a lineal relationship
+            if path_dir.count(-1) == 0 or path_dir.count(1) == 0:
+
+                # id1 is the older individual if the path starts with -1; in this case, flip everything so id2 is listed first
+                if path_dir[0] == -1:
+                    path_dir = [1 for _ in path_dir]
+                    path = path[::-1]
+
+                # get the sex of the younger individual's parent
+                sex = self.ped.nodes[path[1]]["sex"]
+
+                out_paths.append((path, tuple(path_dir), sex))
+                continue
+
+            # find index of the first descent in the pedigree and then check that there are no more ascents after
+            # once we go down in the pedigree, we can't go back up; if this bool is true, continue
+            if path_dir[path_dir.index(-1):].count(1) > 0:
+                continue
+
+            # we want the first node to be the genetically younger individual; we we ensure that this is true
+            # Rule: if id1 is genetically older they are closer to the tmrca
+            if len(path_dir[:path_dir.index(-1)]) < len(path_dir[path_dir.index(-1):]):
+                path_dir = list(np.array(path_dir)*-1)[::-1]
+                path = path[::-1]
+
+            # get the sex of the first individual's parent
+            sex = self.ped.nodes[path[1]]["sex"]
+
+            out_paths.append((path, tuple(path_dir), sex))
+
+        if len(out_paths) == 0:
+            return np.nan, np.nan
+
+        # get a df of all the paths
+        paths_df = pd.DataFrame(out_paths, columns=["path_ids", "path", "sex"])
+
+        # the ibd1 from the given relationship
+        paths_df["ibd1"] = paths_df["path"].apply(lambda x: 0.5**(len(x)-1))
+
+        # id1 is the genetically younger ind, id2 is the older
+        paths_df["id1"] = paths_df["path_ids"].apply(lambda x: x[0])
+        paths_df["id2"] = paths_df["path_ids"].apply(lambda x: x[-1])
+
+        # iterate through each path type
+        for path, path_df in paths_df.groupby("path"):
+
+            # lineal relationship
+            if np.abs(path).sum() == sum(path):
+
+                # default rel; change for PO andGP
+                rel = (len(path)-1)*"G" + "P"
+                prefix = ""
+
+                # they are GP
+                if path == (1,):
+                    rel = "PO"
+
+                # they are GP/GC add the sex
+                elif path == (1, 1):
+                    sex = path_df.iloc[0]["sex"]
+                    prefix = "P" if sex == "1" else ("M" if sex == "2" else "")
+
+                self.add_pair(*path_df.iloc[0][["id1", "id2"]], prefix + rel)                
+        
+            # they are siblings (either FS or HS)
+            elif path == (1, -1):
+                
+                # half siblings
+                if path_df.shape[0] == 1:
+                    sex = path_df.iloc[0]["sex"]
+                    prefix = "P" if sex == "1" else ("M" if sex == "2" else "")
+                    self.add_pair(*path_df.iloc[0][["id1", "id2"]], prefix + "HS")
+
+                # full siblings
+                if path_df.shape[0] == 2:
+                    self.add_pair(*path_df.iloc[0][["id1", "id2"]], "FS")
+
+            # they are avuncular
+            elif path == (1, 1, -1):
+
+                # half-avuncular
+                if path_df.shape[0] == 1:
+                    self.add_pair(*path_df.iloc[0][["id1", "id2"]], "HAV")
+
+                # full avuncular
+                else:
+                    self.add_pair(*path_df.iloc[0][["id1", "id2"]], "AV")
+
+            # they are cousins
+            elif path == (1, 1, -1, -1):
+
+                # half-cousins
+                if path_df.shape[0] == 1:
+                    self.add_pair(*path_df.iloc[0][["id1", "id2"]], "HCO")
+
+                # double cousins
+                elif path_df.shape[0] == 4:
+                    self.add_pair(*path_df.iloc[0][["id1", "id2"]], "DCO")
+
+                # full cousins
+                elif path_df.shape[0] == 2 and len(set(path_df["sex"])) == 1:
+                    self.add_pair(*path_df.iloc[0][["id1", "id2"]], "CO")
+
+                # double half-cousins
+                elif path_df.shape[0] == 2 and len(set(path_df["sex"])) == 2:
+                    self.add_pair(*path_df.iloc[0][["id1", "id2"]], "DHCO")
+
+        # get the kinship through each parent
+        k1, k2 = [paths_df[paths_df.sex==sex]["ibd1"].sum() for sex in ["1", "2"]]
+
+        # return the expected IBD1, IBD2
+        return (k1*(1-k2)) + (k2*(1-k1)), k1*k2
+
+    def find_relationships(self):
+
+        # temp graph that is undirected
+        tmp = self.ped.to_undirected()
+
+        # keep track of expected IBD sharing
+        eIBD = nx.Graph()
+
+        ### iterate through all pairs
+        for id1, id2 in it.combinations(self.ped.nodes, r=2):
+
+            # find and add the relationshipsl; return the expected IBD sharing
+            eIBD1, eIBD2 = self.find_relationship(nx.all_simple_paths(tmp, min(id1, id2), max(id1, id2), cutoff=6))
+
+            # add to the expected IBD graph
+            if eIBD1 > 0:
+                eIBD.add_edge(id1, id2, ibd1=eIBD1, ibd2=eIBD2)
+
+        self.eIBD = eIBD
+
+    # returns all pairs that are under the umbrella (inclusive) of a relationship (root)
+    def get_relationships(self, root):
+        # keep track of pairs
+        out_pairs = self.rels.hier.nodes[root]["pairs"]
+        
+        # iterate through the descendants
+        for child in nx.descendants(self.rels.hier, root):
+            out_pairs |= self.rels.hier.nodes[child]["pairs"]
+
+        return out_pairs
+
+
+
+        
 def infer_second(id1, id2, pair_data, samples,
                 mhs_gap, gp_gap):
 
@@ -201,17 +432,10 @@ def infer_second(id1, id2, pair_data, samples,
     hier_obj = pair_data["probs"]
     hier = hier_obj.hier
 
-    # not PHS
-    if samples.nodes[id1]["father"] != None or samples.nodes[id2]["father"] != None:
-        hier.nodes["PHS"]["p"] = 0
-        hier.nodes["PHS"]["method"] = "pheno"
-        hier.nodes["MHS"]["method"] = "pheno"
-    
-    # not MHS bc mother exists
-    if samples.nodes[id1]["mother"] != None or samples.nodes[id2]["mother"] != None:
-        hier.nodes["MHS"]["p"] = 0
-        hier.nodes["MHS"]["method"] = "pheno"
-        hier.nodes["PHS"]["method"] = "pheno"
+    ### bool is True if we want to use the haplotype classifier
+    use_hap = hier.nodes["HS"]["p"] + hier.nodes["GP/AV"]["p"] >= 0.80
+
+    ### Use phenotype data to set certain relationships to 0
 
     # get the age gap
     age_gap = abs(samples.nodes[id1]["age"] - samples.nodes[id2]["age"])
@@ -221,60 +445,88 @@ def infer_second(id1, id2, pair_data, samples,
         hier.nodes["MHS"]["p"] = 0
         hier.nodes["MHS"]["method"] = "pheno"
         hier.nodes["PHS"]["method"] = "pheno"
-    
+
     # too close in age to be GP
     if age_gap < gp_gap:
-        hier_obj.set_attrs({"GP": 0, "MGP": 0, "PGP": 0}, "p")
-        hier_obj.set_attrs({i: "pheno" for i in ["GP", "MGP", "PGP"]}, "method")
+        hier_obj.set_attrs({i: 0 for i in ["PGP", "MGP", "GP"]}, "p")
+        hier_obj.set_attrs({i: "pheno" for i in ["PGP", "MGP", "GP"]}, "method")
 
-    # compute posterior probs for the n_segs
+    # not a paternal relationship
+    if samples.nodes[id1]["father"] != None or samples.nodes[id2]["father"] != None:
+        # not PHS
+        hier.nodes["PHS"]["p"] = 0
+        hier.nodes["PHS"]["method"] = "pheno"
+        hier.nodes["MHS"]["method"] = "pheno"
+
+    # not MHS bc mother exists
+    if samples.nodes[id1]["mother"] != None or samples.nodes[id2]["mother"] != None:
+        hier.nodes["MHS"]["p"] = 0
+        hier.nodes["MHS"]["method"] = "pheno"
+        hier.nodes["PHS"]["method"] = "pheno"
+
+    # re-compute probabilities
     second_nodes = ["AV", "MGP", "PGP", "PHS", "MHS"]
     prob_sum = sum([hier.nodes[i]["p"] for i in second_nodes])
     hier_obj.set_attrs({i: prob_sum and hier.nodes[i]["p"] / prob_sum or 0 for i in second_nodes}, "p")
 
-    # need to reset the probabilities
+    ### Done with pheno data
 
-    # if hap score is not good, use HSR for GP/AV vs. HS
-    use_hap = hier.nodes["HS"]["p"] + hier.nodes["GP/AV"]["p"] >= 0.80
-    if not use_hap:
+    ### Tier 2 probabilities
+
+    # they are NOT hs; have to be GP/AV
+    if hier.nodes["PHS"]["p"] + hier.nodes["MHS"]["p"] == 0:
+        hier_obj.set_attrs({"HS": 0, "GP/AV": 1}, "p")
+        hier_obj.set_attrs({"HS": "pheno"}, "method")
+
+    # use haplotype data
+    if use_hap:
+        prob_sum = hier.nodes["HS"]["p"] + hier.nodes["GP/AV"]["p"]
+        hier_obj.set_attrs({"HS": hier.nodes["HS"]["p"] / prob_sum if prob_sum > 0 else 0.50,
+                            "GP/AV": hier.nodes["GP/AV"]["p"] / prob_sum if prob_sum > 0 else 0.50}, "p")
+
+    # don't use the haplotype data
+    else:
         hier_obj.set_attrs({"HS": hier.nodes["PHS"]["p"] + hier.nodes["MHS"]["p"],
                         "GP/AV": hier.nodes["MGP"]["p"] + hier.nodes["PGP"]["p"] + hier.nodes["AV"]["p"]}, "p")
         hier_obj.set_attrs({"HS": "segs", "GP/AV": "segs"}, "method")
 
-    # update the PHS and MHS probs
-    p_hs = hier.nodes["PHS"]["p"] + hier.nodes["MHS"]["p"]
-    # prob of hs is zero, either bc of segments of pheno data (likely pheno data)
-    if p_hs == 0:
-        # there are parents present; the p(HS) is 0 and p(GPAV) is 1
-        if hier.nodes["PHS"]["method"] == "pheno" and hier.nodes["MHS"]["method"] == "pheno":
-            hier_obj.set_attrs({"HS": 0, "GP/AV": 1}, "p")
-            hier_obj.set_attrs({"HS": "pheno", "GP/AV": "pheno"}, "method")
-    else:
-        hier_obj.set_attrs({"PHS": hier.nodes["PHS"]["p"] / p_hs,
-                    "MHS": hier.nodes["MHS"]["p"] / p_hs}, "p")
+    ### Tier 3 probabilities
 
+    # for GP vs. AV
+    prob_sum = hier.nodes["MGP"]["p"] + hier.nodes["PGP"]["p"] + hier.nodes["AV"]["p"]
+    hier_obj.set_attrs({"GP": (hier.nodes["PGP"]["p"] + hier.nodes["MGP"]["p"])/prob_sum if prob_sum > 0 else 0.50,
+                        "AV": hier.nodes["AV"]["p"]/prob_sum if prob_sum > 0 else 0.50}, "p")
 
-    # update the GP and AV probs
-    p_gpav = hier.nodes["MGP"]["p"] + hier.nodes["PGP"]["p"] + hier.nodes["AV"]["p"]
-    hier_obj.set_attrs({"GP": p_gpav and (hier.nodes["MGP"]["p"] + hier.nodes["PGP"]["p"]) / p_gpav or 0,
-                    "AV": p_gpav and hier.nodes["AV"]["p"] / p_gpav or 0}, "p")
+    # for MHS versus PHS
+    prob_sum = hier.nodes["MHS"]["p"] + hier.nodes["PHS"]["p"]
+    hier_obj.set_attrs({"PHS": prob_sum and hier.nodes["PHS"]["p"]/prob_sum or 0.50,
+                        "MHS": prob_sum and hier.nodes["MHS"]["p"]/prob_sum or 0.50}, "p")
 
-    # update the sex-specific GP probs
-    p_gp = hier.nodes["MGP"]["p"] + hier.nodes["PGP"]["p"]
-    hier_obj.set_attrs({"MGP": p_gp and hier.nodes["MGP"]["p"] / p_gp or 0,
-                    "PGP": p_gp and hier.nodes["PGP"]["p"] / p_gp or 0}, "p")
+    ### Tier 4 probabilities
 
+    # for MGP vs PGP
+    prob_sum = hier.nodes["MGP"]["p"] + hier.nodes["PGP"]["p"]
+    hier_obj.set_attrs({"PGP": hier.nodes["PGP"]["p"]/prob_sum if prob_sum > 0 else 0.50,
+                        "MGP": hier.nodes["MGP"]["p"]/prob_sum if prob_sum > 0 else  0.50}, "p")
+
+    hier_obj.set_attrs({"relatives": 1, "2nd": hier.nodes["2nd"]["p"]}, "post")
     # iterate down the tree and compute the posterior prob
     for parent, child in nx.bfs_edges(hier, "2nd"):
 
+        hier_obj.set_attrs({child: hier.nodes[child]["p"] * hier.nodes[parent]["post"]}, "post")
+
         # need to order according to genetically youngest --> oldest
         if child in ["GP", "MGP", "PGP", "AV", "GP/AV"]:
+
+            # use age
             if samples.nodes[id1]["age"] > samples.nodes[id2]["age"]:
                 hier.nodes[child]["ordering"] = (id2, id1)
                 hier.nodes[child]["ordering_method"] = "age"
             elif samples.nodes[id2]["age"] > samples.nodes[id1]["age"]:
                     hier.nodes[child]["ordering"] = (id1, id2)
-                    hier.nodes[child]["ordering_method"] = "age"        
+                    hier.nodes[child]["ordering_method"] = "age"  
+
+            # use the haplotype score      
             elif use_hap:
                 if samples.edges[id1, id2]["h"][id1] > samples.edges[id1, id2]["h"][id2]:
                     hier.nodes[child]["ordering"] = (id1, id2)
@@ -287,9 +539,15 @@ def readable_results(results, min_p):
 
     out_results = []
     for (id1, id2), hier in results.items():
-        # get all relatives who have >min_p probability; sort by largest --> smallest depth; take relative with largest depth
-        deepest_rel = sorted([[len(nx.shortest_path(hier, "relatives", i)), i] for i in nx.dfs_preorder_nodes(hier, "relatives")\
-                if hier.nodes[i]["post"] > min_p], key=lambda x: x[0])[-1][1]
+
+        # compute lengths of all paths from relatives
+        paths = nx.single_source_shortest_path_length(hier, "relatives")
+
+        # highly probable rels
+        probable_rels = sorted([[l and 1/l or np.inf, rel] for rel, l in paths.items() if hier.nodes[rel]["post"] > min_p])
+
+        # get the deepest rel
+        deepest_rel = probable_rels[0][1]
         
         # get the degree of relative
         degree = nx.shortest_path(hier, "relatives", deepest_rel)[1] if deepest_rel != "relatives" else "relatives"
@@ -310,18 +568,26 @@ if __name__ == "__main__":
     args = parse_args()
 
     ### Samples is a SampleData obj that has all node and pairwise IBD information
-    Samples = SampleData(fam_file= args.fam,
-                         ibd_file=args.ibd,
-                         age_file=args.ages,
-                         map_file=args.map,
-                         pop_file=args.populations,
-                         population=args.population,
-                         n_pairs=args.n_pairs)
+    if args.debug:
+        print("In debug mode.")
+        i = open("Samples_debug.pkl", "rb")
+        Samples = pkl.load(i)
+        i.close()
+
+    else:
+        Samples = SampleData(fam_file=args.fam,
+                            ibd_file=args.ibd,
+                            age_file=args.ages,
+                            map_file=args.map,
+                            pop_file=args.populations,
+                            population=args.population,
+                            n_pairs=args.n_pairs)
 
     ### Training step
     
     # True if there is already trained data; load the pickled training objs
     if os.path.exists(args.training):
+        print("Trained classifiers provided.")
 
         # load the degree classifier
         # proba goes: [2nd, 3rd, 4th, FS]
@@ -338,10 +604,42 @@ if __name__ == "__main__":
         infile = open(args.training.replace("degree", "hap"), "rb")
         hap_classfr = pkl.load(infile)
 
+    # pedigree object to find existing relationships
+    print("Finding pedigree relationships")
+    if args.debug:
+        i = open("Pedigree_debug.pkl", "rb")
+        pedigree = pkl.load(i)
+        i.close()
+    else:
+        try:
+            pedigree = Pedigree(Samples.g, degree_classfr)
+        except:
+            pedigree = Pedigree(Samples.g, None)
+
+        # find relationships
+        pedigree.find_relationships()
+
+    # no training provided; generate by self
+    if not os.path.exists(args.training):
+        print("Trained classifiers not provided. Training classifiers now.")
+
+        # get the training data
+        train = TrainPonderosa(real_data=True, samples=Samples, pedigree=pedigree)
+
+        ### haplotype classifier
+        hap_classfr = train.hap_classifier()
+
+        ### n segs classifier
+        nsegs_classfr = train.nsegs_classifier()
+
+        ### degree classifier
+        degree_classfr = train.degree_classifier()
+
     ### Classification step 1: degree of relatedness
+    print("Beginning classification.")
 
     # get the input data; X has the following cols: id1, id2, ibd1, ibd2
-    edges, X_degree = Samples.get_edge_data(["ibd1", "ibd2"], lambda x: 0.05 < x["k"] < 0.45)
+    edges, X_degree = Samples.get_edge_data(["ibd1", "ibd2"], lambda x: (0 < x["k"] < 0.42) or (0.1 < x["ibd2"] < 0.5))
     degree_probs = degree_classfr.predict_proba(X_degree)
 
     # add the classification probs
@@ -381,14 +679,10 @@ if __name__ == "__main__":
         if pair_data["probs"].hier.nodes["2nd"]["p"] > 0.80:
             infer_second(id1, id2, pair_data, Samples.g, 30, 30)
 
-        hier = pair_data["probs"].hier
+        else:
+            pair_data["probs"].set_attrs({i: j.get("p" if i != "relatives" else "post", 1) for i,j in pair_data["probs"].hier.nodes(data=True)}, "post")
 
-        # percolate the probabilities down the tree
-        for parent, child in nx.bfs_edges(hier, "relatives"):
-            # posterior prob is the post prob of the parent times the conditional of the child
-            post = hier.nodes[parent]["post"] *  hier.nodes[child]["p"]
-            # update the attribute
-            hier.nodes[child]["post"] = post
+        hier = pair_data["probs"].hier
 
         # add the pair data as a node with attributes
         hier.add_node("pair_data",

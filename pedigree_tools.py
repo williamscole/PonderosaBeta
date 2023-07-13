@@ -183,7 +183,6 @@ class ProcessSegments:
         # iterate through the chromosome
         for _, chrom_df in self.segs.groupby("chromosome"):
             r= {}
-
             # iterate through segments
             for _, row in chrom_df.iterrows():
                 # on id1
@@ -210,12 +209,17 @@ class ProcessSegments:
             hap[1] += max(temp[3], temp[4])
 
         # return hap score
-        return hap[0]/tot, hap[1]/tot
+        h1, h2 = tot and hap[0]/tot or 0, tot and hap[1]/tot or 0
+        print(h1,h2)
+        return h1, h2
 
-    def ponderosa_data(self, genome_len):
+    def ponderosa_data(self, genome_len, empty=False):
         # creates an empty class
         class ponderosa: pass
         ponderosa = ponderosa()
+
+        if empty:
+            return ponderosa
 
         # add ibd1, ibd2 data
         ibd1, ibd2 = self.get_ibd1_ibd2()
@@ -317,11 +321,13 @@ class PedigreeHierarchy:
                     ["GP/AV", "GP"],
                     ["GP", "MGP"],
                     ["GP", "PGP"],
+                    ["2nd", "DCO"],
                     ["2nd", "HS"],
                     ["HS", "MHS"],
                     ["HS", "PHS"],
                     ["GP/AV", "AV"],
                     ["3rd", "CO"],
+                    ["3rd", "DHCO"],
                     ["3rd", "GGP"],
                     ["GGP", "MGGP"],
                     ["GGP", "PGGP"],
@@ -333,7 +339,9 @@ class PedigreeHierarchy:
                     ["4th", "HCO"],
                     ["HCO", "MHCO"],
                     ["HCO", "PHCO"],
-                    ["4th", "CORM"]]
+                    ["4th", "CORM"],
+                    ["4th", "GGGP"]]
+            
         self.hier = nx.DiGraph()
         self.hier.add_edges_from(hier)
         self.init_nodes = set(self.hier.nodes)
@@ -343,13 +351,16 @@ class PedigreeHierarchy:
         self.hier.add_edge(parent_node, child_node)
     
     # given a relationship, returns the the relative pairs under that relationship
-    def get_pairs(self, node):
-        children = set(nx.descendants(self.hier, node))
-        return children - self.init_nodes
-    
+    # pairs is True --> returns paired tuples; pairs is False --> returns relative nodes
+    def get_nodes(self, node):
+        return nx.descendants(self.hier, node) - self.init_nodes
+
+    def get_relative_nodes(self, node, include=False):
+        return (nx.descendants(self.hier, node) & self.init_nodes) | ({node} if include else set())
+
     # given a list of relationship nodes, returns all pairs under
-    def get_pairs_from_list(self, node_list):
-        return set(it.chain(*[self.get_pairs(node) for node in node_list]))
+    def get_nodes_from_list(self, node_list):
+        return set(it.chain(*[list(self.get_nodes(node)) for node in node_list]))
 
     # adds a single attributes to the nodes in the dict
     # attrs is a dict like {rel1: attr1, rel2: attr2} and attr_name is the name of the attr
@@ -377,10 +388,52 @@ class TrainPonderosa:
         # get the name of the population
         self.popln = kwargs.get("population", "pop1")
         
-        # if using real data, there are additional kwargs
+        # if using real data, there are additional kwargs that are required. These include
+        # samples: Samples object
+        # pedigree: Pedigree object
         if real_data:
-            ibd_segments = kwargs["ibd"]
-            rels = kwargs["relative_df"]
+
+            # get the objects
+            samples = kwargs["samples"]
+            pedigree = kwargs["pedigree"]
+            genome_len = samples.genome_len
+
+            # iterate through all the pairs
+            for id1, id2 in pedigree.pairs.get_nodes("relatives"):
+
+                # get the ibd data from the pair
+                edge_data = samples.g.get_edge_data(id1, id2)
+
+                # no IBD data; continue
+                if edge_data == None:
+                    continue
+
+                # get the ibd segments
+                pair_df = edge_data["segments"]
+
+                # make a process segments obj
+                s = ProcessSegments(pair_df)
+
+                # get an empty ponderosa data obj and fill with the edge data 
+                data = s.ponderosa_data(None, empty=True)
+                data.ibd1 = edge_data["ibd1"]; data.ibd2 = edge_data["ibd2"]
+                data.h1 = edge_data["h"][id1]; data.h2 = edge_data["h"][id2]
+                data.n = edge_data["n"]
+
+                # add the data
+                rel = nx.predecessor(pedigree.pairs,(id1,id2))
+                self.pairs.add_relative(rel, data)
+
+                # if a 2nd degree relative
+                if nx.predecessor(pedigree.pairs, rel) == "2nd":
+                        pair_df_se = introduce_phase_error(pair_df, kwargs.get("mean_d", 30))
+                        
+                        # get h1 and h2
+                        s = ProcessSegments(pair_df_se)
+                        data = s.ponderosa_data(genome_len)
+                        
+                        # add to pedigree hierarchy
+                        self.pairs.add_relative("PhaseError", data)
         
         else:
             # load the simulated segments
@@ -1394,6 +1447,126 @@ class Karyogram:
 
         plt.savefig(f"{kwargs.get('file_name', 'karyogram')}.png", dpi = kwargs.get('dpi', 500))
 
+'''This is a function that is designed to resolve half-sibs from FS.
+Given that a pair shares one parent, is it more likely that they also
+share their other parent (and are FS) or that their other parent
+are different. It takes as arguments:
+pedigree: networkx DiGraph where edges indicate parent --> offspring
+pair_data: networkx Graph where edges contain attrs ibd1 and ibd2
+classifier: an sklearn classifier that will spit out 2nd or FS; optional in which case it will train a model'''
+def SiblingClassifier(pedigree, pair_data, dummy_n, classifier=None):
+    # keep track of the sibling pairs
+    sibling_pairs = set()
+
+    # keep track of parentless nodes
+    parentless = set()
+
+    # iterate through all nodes
+    for parent in pedigree.nodes:
+        # get all children
+        children = sorted(nx.descendants_at_distance(pedigree, parent, 1))
+
+        # add all pairs to sibling_pairs
+        sibling_pairs |= set(it.combinations(children, r=2))
+
+        # see if there are any predecessors
+        if len(set(pedigree.predecessors(parent))) == 0:
+            parentless |= {parent}
+
+    # iterate through all edges between parentless nodes
+    for id1, id2, data in pair_data.subgraph(parentless).edges(data=True):
+        # only take putative FS
+        if 0.10 < data["ibd2"] < 0.50:
+            sibling_pairs |= {(id1, id2)}
+
+    # create a df containing the pairs and ther ibd values
+    sib_df = pd.DataFrame(list(sibling_pairs), columns=["id1", "id2"])
+    sib_df["ibd1"] = sib_df.apply(lambda x: pair_data.get_edge_data(x.id1, x.id2, {"ibd1": np.nan})["ibd1"], axis=1)
+    sib_df["ibd2"] = sib_df.apply(lambda x: pair_data.get_edge_data(x.id1, x.id2, {"ibd2": np.nan})["ibd2"], axis=1)
+    sib_df = sib_df.dropna().reset_index(drop=True)
+
+    # now get the parents each pair has in common
+    sib_df["parents"] = sib_df.apply(lambda x: set(pedigree.predecessors(x.id1)) & set(pedigree.predecessors(x.id2)), axis=1)
+
+    # they are FS if they have two parents in common and HS if one parent in common AND there is one other parent ruling out their HS
+    sib_df["other_parents"] = sib_df.apply(lambda x: len((set(pedigree.predecessors(x.id1)) | set(pedigree.predecessors(x.id2))) - x.parents) > 0, axis=1)
+    sib_df["half"] = sib_df.apply(lambda x: "FS" if len(x.parents) == 2 else ("2nd" if x.other_parents else np.nan), axis=1)
+
+    ### Now we need to either load the classifier or train one
+    if classifier == None:
+        sibClassif = LinearDiscriminantAnalysis().fit(sib_df.dropna()[["ibd1", "ibd2"]].values, sib_df.dropna()["half"].values)
+
+    # classifier is supplied; use it
+    else:
+        sibClassif = classifier
+
+    # classify the NaN rows, which are putative FS
+    putFS = sib_df[sib_df["half"].isna()].copy()
+    putFS["half"] = sibClassif.predict(putFS[["ibd1", "ibd2"]].values)
+
+    # get a graph of all parentless FS pairs; makes it easier to find clusters of FS
+    FS = nx.Graph()
+    FS.add_weighted_edges_from(putFS[putFS.half=="FS"][["id1", "id2", "parents"]].values)
+
+    # make a copy of the pedigree obj
+    ped_copy = pedigree.copy()
+
+    # iterate through families of FS
+    for fam in nx.connected_components(FS):
+
+        # get the family subgraph
+        sub = FS.subgraph(fam)
+        # the set of the parents 
+        parents = set(it.chain(*[list(e["weight"]) for _,_,e in sub.edges(data=True)]))
+
+        # no parents; create both
+        if len(parents) == 0:
+            # parent names
+            father = f"dummy{dummy_n+1}"
+            mother = f"dummy{dummy_n+2}"
+            dummy_n += 2
+
+            # add the edges and the nodes attrs
+            ped_copy.add_edges_from([[i, j] for i,j in it.product([father, mother], list(fam))])
+            ped_copy.nodes[father]["sex"] = "1"; ped_copy.nodes[father]["age"] = np.nan
+            ped_copy.nodes[mother]["sex"] = "2"; ped_copy.nodes[mother]["age"] = np.nan
+
+        # one parent; create the other parent
+        elif len(parents) == 1:
+            # get the parent
+            parent1 = parents.pop()
+            # name the new parent
+            parent2 = f"dummy{dummy_n+1}"; dummy_n += 1
+
+            # get the sex of the parent and get the sex of the new parent
+            sex1 = pedigree.nodes[parent]["sex"]
+            sex2 = {"0": "0", "1": "2", "2": "1"}[sex1]
+
+            # add the edges and the node attrs of the new parent
+            ped_copy.add_edges_from([[i, j] for i,j in it.product([parent2], list(fam))])
+            ped_copy.nodes[parent2]["sex"] = sex2; ped_copy.nodes[parent2]["age"] = np.nan
+
+    return dummy_n, ped_copy
+
+def remove_missing(vcffile):
+
+    with open(vcffile) as file:
+
+        for lines in file:
+
+            if "#" in lines:
+                print(lines.strip())
+
+            else:
+                lines = lines.replace(".|.", "0|0")
+                lines = lines.replace(".|0", "0|0")
+                lines = lines.replace("0|.", "0|0")
+                lines = lines.replace(".|1", "1|1")
+                lines = lines.replace("1|.", "1|1")
+                print(lines.strip())
+                
+
+
 # p = PedigreeNetwork("Himba_allPO.fam")
 # p.get_paths()
 
@@ -1416,6 +1589,9 @@ if __name__ == "__main__":
             df = ibd_results
 
         df.to_feather("simulated_segments.f")
+
+    if sys.argv[-1] == "missing":
+        remove_missing(sys.argv[-2])
 
     if sys.argv[-1] == "pop_ibd":
         p = PedSims("")
