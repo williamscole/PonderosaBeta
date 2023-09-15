@@ -1681,7 +1681,7 @@ def SiblingClassifier(pedigree, pair_data, dummy_n, classifier=None):
     sib_df = sib_df.dropna().reset_index(drop=True)
 
     if sib_df.shape[0] == 0:
-        return pedigree, dummy_n
+        return dummy_n, pedigree.copy()
 
     # now get the parents each pair has in common
     sib_df["parents"] = sib_df.apply(lambda x: set(pedigree.predecessors(x.id1)) & set(pedigree.predecessors(x.id2)), axis=1)
