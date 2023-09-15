@@ -3,6 +3,7 @@ import pandas as pd
 import itertools as it
 import numpy as np
 from datetime import datetime
+from math import floor
 # import phasedibd as ibd
 import os
 from collections import Counter
@@ -14,7 +15,7 @@ import seaborn as sns
 import pickle as pkl
 import sys
 import concurrent.futures
-
+import subprocess
 
 def split_regions(region_dict, new_region):
     # returns the overlap of 2 regions (<= 0 if no overlap)
@@ -210,7 +211,6 @@ class ProcessSegments:
 
         # return hap score
         h1, h2 = tot and hap[0]/tot or 0, tot and hap[1]/tot or 0
-        print(h1,h2)
         return h1, h2
 
     def ponderosa_data(self, genome_len, empty=False):
@@ -1279,6 +1279,197 @@ class PedSims:
 
     def get_items(self):
         return self.famG, self.ibd, self.root_nodes
+    
+
+class Simulations:
+
+    def __init__(self, args):
+
+        # set the various vars
+        vcf = args.vcf
+        pop = args.pop
+
+
+        # get the samples
+        samples = pd.DataFrame(str(subprocess.run(f"bcftools query -l {vcf}", shell=True, stdout=subprocess.PIPE).stdout, encoding='utf-8').split(), columns=["id1"])
+
+        # get the populations
+        if args.pop_file != None and os.path.exists(args.pop_file):
+            pops = pd.read_csv(args.pop_file, columns=["id1", "population"])
+            samples = samples.merge(pops, on="id1", how="left")
+        
+        # no population file has been found; default is that all samples belong to the same population
+        else:
+            print("No population file found or supplied. Assuming one population.")
+            samples["population"] = "pop1"
+
+        # subset the samples from the population
+        pop_samples = samples[samples.population==pop]
+
+        # check that there are enough samples
+        if pop_samples.shape[0] < 10:
+            print("Not enough samples in the population!")
+
+        # check to see if the simulation dir exists
+        if os.path.exists(f"{pop}_sims/"):
+            print("Simulation file already exists!")
+
+        # create simulation directory
+        subprocess.run(f"mkdir {pop}_sims/", shell=True)
+
+        # write out the samples to a text file and then subset the vcf
+        pop_samples["id1"].to_csv(f"{pop}_sims/pop_ids.txt", index=False, header=False)
+        subprocess.run(f"bcftools view -S {pop}_sims/pop_ids.txt {vcf} > {pop}_sims/input.vcf", shell=True)
+
+        # save attributes to the class
+        self.samples = pop_samples
+        self.n_samples = pop_samples.shape[0]
+
+        # open king
+        king_df = pd.read_csv(args.king, delim_whitespace=True)
+        # subset king
+        id1_col = king_df["ID1"].isin(pop_samples["id1"].values)
+        id2_col = king_df["ID2"].isin(pop_samples["id1"].values)
+        pop_king = king_df[(id1_col) & (id2_col)]
+
+        # what percentage are above the kinship threshold?
+        n = pop_samples.shape[0]
+        n_pairs = n*(1-n)/2
+        n_over = pop_king[pop_king.PropIBD>args.k].shape[0]
+        print(f"Probability of a random mating pair more related than the threshold: {abs(round(n_over / n_pairs, 2))}")
+        
+        # create ibd network
+        self.ibd_g = nx.Graph()
+        self.ibd_g.add_weighted_edges_from(pop_king[["ID1","ID2","PropIBD"]].values, "PropIBD")
+
+        # iteration number
+        self.iter = 1
+
+        # create the runs
+        self.run = f"{args.pedsim} -i {pop}_sims/input.vcf -m {args.simmap} --intf {args.intf} --keep_phase --founder_ids "
+
+        # store var things
+        self.pop = pop
+        self.path = f"{pop}_sims/"
+
+    def simulation_iter(self, args):
+
+        # list of def files
+        def_files = str(subprocess.run(f"ls {args.def_dir}*def", shell=True, stdout=subprocess.PIPE).stdout, encoding='utf-8').split()
+
+        # keep list of all commands
+        commands = []
+
+        # iterate through the def files
+        for def_file in def_files:
+            # get the relative type
+            rel = def_file.split("/")[-1].split(".")[0]
+
+            # get the number founders needed per iteration
+            fline = open(def_file).readline().rstrip()
+            n_founders = int(fline.split()[1])
+
+            # compute the max number of iters possible given the size of the vcf
+            ped_iters = floor(self.n_samples / n_founders)
+
+            # add the --out argument
+            run = self.run + f"-o {self.pop}_sims/{rel}_{self.iter} "
+            # add the def argument
+            run += f"-d <(sed 's;n_iter;{ped_iters};g' {def_file})"
+
+            # add to list of commands
+            commands.append(run)
+
+        # write out a file with a list of the ped-sim commands to run
+        out = open(f"{self.pop}_sims/iter{self.iter}.txt", "w")
+        out.write("\n".join(commands))
+
+    def run_phasedibd(self, args):
+
+        import phasedibd as ibd
+
+        vcf_files = str(subprocess.run(f"ls {self.pop}_sims/*_{self.iter}.vcf", shell=True, stdout=subprocess.PIPE).stdout, encoding='utf-8').split()
+
+        ### bgzip and index the files
+        for index, vcf in enumerate(vcf_files):
+
+            subprocess.run(f"bcftools view {vcf} -O z -o {vcf}.gz", shell=True)
+            subprocess.run(f"bcftools index {vcf}.gz", shell=True)
+            subprocess.run(f"rm {vcf}", shell=True)
+            vcf_files[index] = f"{vcf}.gz"
+
+
+        # hold all ibd segments
+        ibd_segments = pd.DataFrame()
+
+        for chrom in range(1, 23):
+
+            map_df = pd.read_csv(args.map.replace("chr1", f"chr{chrom}"), delim_whitespace=True,
+                                 names=["chrom", "rs", "cm", "mb"],
+                                 dtype={"chrom": int, "rs": str, "cm":float, "mb":int})
+
+            for vcf in vcf_files:
+
+                tmp_file = vcf.split(".vcf.gz")[0] + f"_chr{chrom}.vcf"
+
+                subprocess.run(f"bcftools view {vcf} --regions {chrom} -o {tmp_file}", shell=True)
+
+                pos = str(subprocess.run(f'bcftools query -f "%POS " {tmp_file}', shell=True, stdout=subprocess.PIPE).stdout, encoding='utf-8').split()
+
+                tmp_map = pd.DataFrame([int(i) for i in pos], columns=["mb"])
+                tmp_map["cm"] = np.interp(tmp_map["mb"].values, map_df["mb"].values, map_df["cm"].values)
+                tmp_map = tmp_map.merge(map_df[["chrom", "rs", "mb"]], on="mb", how="left")
+
+                # create the file
+                tmp_map[["chrom", "rs", "cm", "mb"]].to_csv(f"{tmp_file.replace('.vcf', '.map')}", index=False, header=False, sep=" ")
+
+                # run ibd
+                haplotypes = ibd.VcfHaplotypeAlignment(tmp_file, tmp_file.replace(".vcf", ".map"))
+                tpbwt = ibd.TPBWTAnalysis()
+                ibd_results = tpbwt.compute_ibd(haplotypes)
+
+                # get the samples from the header
+                head = str(subprocess.run(f'bcftools query -l {tmp_file}', shell=True, stdout=subprocess.PIPE).stdout, encoding='utf-8').split()
+                ibd_results["id1"] = ibd_results["id1"].apply(lambda x: head[x])
+                ibd_results["id2"] = ibd_results["id2"].apply(lambda x: head[x])
+
+                # add to existing
+                ibd_segments = pd.concat([ibd_segments, ibd_results])
+
+        ibd_segments.to_csv(f"{self.path}ibd_segments_iter{self.iter}.txt", sep="\t", header=True, index=False)
+
+    def analyze_ibd(self, args):
+
+        ibd_segments = pd.read_csv(f"{self.path}ibd_segments_iter{self.iter}.txt", delim_whitespace=True)
+
+        # ibd_segments["fid1"] = ibd_segments["id1"].apply(lambda x:)
+
+        print(ibd_segments)
+
+
+
+
+
+                # subprocess.run(f"bcftools ")
+
+                # print(tmp_file)
+
+            # print(map_df)
+
+
+
+
+
+
+
+
+            
+
+    
+        
+
+
+
 
 class PedigreeNetwork:
     
@@ -1488,6 +1679,9 @@ def SiblingClassifier(pedigree, pair_data, dummy_n, classifier=None):
     sib_df["ibd1"] = sib_df.apply(lambda x: pair_data.get_edge_data(x.id1, x.id2, {"ibd1": np.nan})["ibd1"], axis=1)
     sib_df["ibd2"] = sib_df.apply(lambda x: pair_data.get_edge_data(x.id1, x.id2, {"ibd2": np.nan})["ibd2"], axis=1)
     sib_df = sib_df.dropna().reset_index(drop=True)
+
+    if sib_df.shape[0] == 0:
+        return pedigree, dummy_n
 
     # now get the parents each pair has in common
     sib_df["parents"] = sib_df.apply(lambda x: set(pedigree.predecessors(x.id1)) & set(pedigree.predecessors(x.id2)), axis=1)

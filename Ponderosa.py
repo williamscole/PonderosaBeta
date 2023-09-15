@@ -153,8 +153,12 @@ class SampleData:
                                      segments=pair_df)
 
                 # check to see if parents
-                if ibd_data.ibd1 > 0.75:
+                if ibd_data.ibd1 > 0.8:
                     hier.set_attrs({"1st": 1, "PO": 1, "FS": 0}, "p")
+
+                # check if MZ twins
+                if ibd_data.ibd2 > 0.90:
+                    hier.set_attrs({"MZ": 1}, "p")
 
                 n_pairs += 1
                 if n_pairs % 100 == 0:
