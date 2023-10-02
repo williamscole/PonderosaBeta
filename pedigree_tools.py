@@ -17,6 +17,8 @@ import pickle as pkl
 import sys
 import concurrent.futures
 import subprocess
+from matplotlib import colors
+
 
 def split_regions(region_dict, new_region):
     # returns the overlap of 2 regions (<= 0 if no overlap)
@@ -50,6 +52,84 @@ def split_regions(region_dict, new_region):
         # unpack the membership
         out_region[(start,stop)] = sorted(it.chain(*info))
     return out_region
+
+
+def visualize_classifiers(classif_name, classif, ax):
+
+    def plot_degree_classifier(classif, ax):
+
+        labs = list(classif.classes_)
+
+        XX, YY = np.meshgrid(np.linspace(0, 1, 500), np.linspace(0, 0.5, 250))
+
+        Z = classif.predict(np.c_[XX.ravel(), YY.ravel()])
+
+        # plot colors
+        Z = np.array([labs.index(i) for i in Z])
+        Z = Z.reshape(XX.shape)
+        ax.pcolormesh(XX, YY, Z, cmap="rainbow")
+
+        # plot countour lines
+        Z = classif.predict_proba(np.c_[XX.ravel(), YY.ravel()])
+        for i in range(len(labs)):
+            Zi = Z[:,i].reshape(XX.shape)
+
+            ax.contour(XX, YY, Zi, [0.5], linewidths=4, colors="white")
+
+        ax.set_xlabel("IBD1")
+        ax.set_ylabel("IBD2")
+        ax.set_title("degree classifier")
+
+    def plot_hap_classifier(classif, ax):
+
+        labs = list(classif.classes_)
+
+        XX, YY = np.meshgrid(np.linspace(0.5, 1, 500), np.linspace(0.5, 1, 500))
+
+        Z = classif.predict(np.c_[XX.ravel(), YY.ravel()])
+
+        colorsList = [(198, 30, 49),(150, 130, 88),(38, 1, 90)]
+        cmap = colors.ListedColormap(colorsList)
+
+        Z = np.array([labs.index(i) for i in Z])
+        Z = Z.reshape(XX.shape)
+        ax.pcolormesh(XX, YY, Z, cmap=cmap)
+
+        Z = classif.predict_proba(np.c_[XX.ravel(), YY.ravel()])
+        for i in range(len(labs)):
+            Zi = Z[:,i].reshape(XX.shape)
+            ax.contour(XX, YY, Zi, [0.5], linewidths=4, colors="white")
+            
+        ax.set_xlabel("h1")
+        ax.set_ylabel("h2")
+        ax.set_title("hap classifier")
+
+    def plot_nsegs_classifier(classif, ax):
+
+        X = np.arange(10, 120)
+
+        labs = classif.classes_
+
+        for index, lab in enumerate(labs):
+
+            Y = classif.predict_proba([[0.5, i] for i in X])[:, index]
+
+            ax.plot(X, Y, label=lab)
+
+        ax.legend()
+        ax.set_xlabel("Number of segments")
+        ax.set_ylabel("Probability")
+        ax.set_title("nsegs classifier")
+
+    if classif_name == "degree":
+        plot_degree_classifier(classif, ax)
+
+    elif classif_name == "hap":
+        plot_hap_classifier(classif, ax)
+
+    elif classif_name == "nsegs":
+        plot_nsegs_classifier(classif, ax)
+
 
 # perform various computations on ibd segments for a pair of individuals
 # takes as input a phasedibd segment data frame
