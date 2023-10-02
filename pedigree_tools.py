@@ -3,7 +3,8 @@ import pandas as pd
 import itertools as it
 import numpy as np
 from datetime import datetime
-from math import floor
+import time
+from math import floor, ceil
 # import phasedibd as ibd
 import os
 from collections import Counter
@@ -1279,6 +1280,27 @@ class PedSims:
 
     def get_items(self):
         return self.famG, self.ibd, self.root_nodes
+
+def quick_kinship(pair_df):
+    # keep track of cm ibd1, ibd2
+    ibd1, ibd2 = 0, 0
+
+    # iterate through the chromosomes
+    for _, chrom_df in pair_df.groupby("chromosome"):
+        # add a column that is the cm of the ibd segments
+        chrom_df["r"] = chrom_df.apply(lambda x: np.arange(ceil(x.start_cm), floor(x.end_cm)+1), axis=1)
+        chrom_df["sites1"] = chrom_df.apply(lambda x: [(i, x.id1_haplotype) for i in x.r], axis=1)
+        chrom_df["sites2"] = chrom_df.apply(lambda x: [(i, x.id2_haplotype) for i in x.r], axis=1)
+
+        sites1 = [i[0] for i in set(it.chain(*chrom_df.sites1.values))]
+        sites2 = [i[0] for i in set(it.chain(*chrom_df.sites2.values))]
+
+        sites = Counter(sites1 + sites2)
+
+        ibd1 += sum([1 for site, c in sites.items() if c < 4])
+        ibd2 += sum([1 for site, c in sites.items() if c == 4])
+
+    return ibd1, ibd2
     
 
 class Simulations:
@@ -1346,11 +1368,17 @@ class Simulations:
         self.iter = 1
 
         # create the runs
-        self.run = f"{args.pedsim} -i {pop}_sims/input.vcf -m {args.simmap} --intf {args.intf} --keep_phase --founder_ids "
+        self.run = f"{args.pedsim} -i input.vcf -m {args.simmap} --intf {args.intf} --keep_phase --founder_ids --fam "
+
+        # target number of pairs
+        self.target = 50
 
         # store var things
+        self.k = args.k
         self.pop = pop
         self.path = f"{pop}_sims/"
+        self.rel_founders = {}
+        self.rel_n = {}
 
     def simulation_iter(self, args):
 
@@ -1365,24 +1393,29 @@ class Simulations:
             # get the relative type
             rel = def_file.split("/")[-1].split(".")[0]
 
+            # already have enough relatives, skip
+            if self.rel_n.get(rel, 0) > 50:
+                continue
+
             # get the number founders needed per iteration
             fline = open(def_file).readline().rstrip()
             n_founders = int(fline.split()[1])
+            self.rel_founders[rel] = n_founders
 
             # compute the max number of iters possible given the size of the vcf
             ped_iters = floor(self.n_samples / n_founders)
 
             # add the --out argument
-            run = self.run + f"-o {self.pop}_sims/{rel}_{self.iter} "
+            run = self.run + f"-o {rel}_{self.iter} "
             # add the def argument
-            run += f"-d <(sed 's;n_iter;{ped_iters};g' {def_file})"
+            run += f"-d <(sed 's;n_iter;{ped_iters};g' {def_file})\n"
 
             # add to list of commands
             commands.append(run)
 
         # write out a file with a list of the ped-sim commands to run
         out = open(f"{self.pop}_sims/iter{self.iter}.txt", "w")
-        out.write("\n".join(commands))
+        out.write("".join(commands))
 
     def run_phasedibd(self, args):
 
@@ -1426,7 +1459,7 @@ class Simulations:
                 # run ibd
                 haplotypes = ibd.VcfHaplotypeAlignment(tmp_file, tmp_file.replace(".vcf", ".map"))
                 tpbwt = ibd.TPBWTAnalysis()
-                ibd_results = tpbwt.compute_ibd(haplotypes)
+                ibd_results = tpbwt.compute_ibd(haplotypes, use_phase_correction=False)
 
                 # get the samples from the header
                 head = str(subprocess.run(f'bcftools query -l {tmp_file}', shell=True, stdout=subprocess.PIPE).stdout, encoding='utf-8').split()
@@ -1440,11 +1473,47 @@ class Simulations:
 
     def analyze_ibd(self, args):
 
+        id_files = str(subprocess.run(f"ls {self.pop}_sims/*_{self.iter}.ids", shell=True, stdout=subprocess.PIPE).stdout, encoding='utf-8').split()
+
+        for id_file in id_files:
+
+            rel = id_file.split("/")[-1].split("_")[0]
+
+            ids = [tuple(i.split()) for i in open(id_file).readlines()]
+
+            ids_df = pd.DataFrame([i if len(i)==2 else (np.nan, i[0])  for i in ids], columns=["sim_id", "id1"])
+
+            fam_size = self.rel_founders[rel]
+
+            rm_family = []
+            for index in range(0, ids_df.shape[0], fam_size):
+
+                fam_df = ids_df.iloc[index:index+fam_size]
+
+                ks = [self.ibd_g.get_edge_data(i, j, {}).get("PropIBD", 0) for i,j in it.combinations(fam_df["id1"].values, r=2)]
+
+                if max(ks) > self.k:
+                    fam_name = fam_df.dropna()["sim_id"].values[0].split("_")[0]
+                    rm_family.append(fam_name)
+                    print(f"Removed family {fam_name} in iteration {self.iter}.")
+
         ibd_segments = pd.read_csv(f"{self.path}ibd_segments_iter{self.iter}.txt", delim_whitespace=True)
+        ibd_segments["fid1"] = ibd_segments["id1"].apply(lambda x: x.split("_")[0])
+        ibd_segments["fid2"] = ibd_segments["id2"].apply(lambda x: x.split("_")[0])
+        ibd_segments = ibd_segments[ibd_segments.apply(lambda x: x.fid1 == x.fid2 and x.fid1 not in rm_family, axis=1)]
 
-        # ibd_segments["fid1"] = ibd_segments["id1"].apply(lambda x:)
+        segs = ProcessSegments(pd.DataFrame())
+        for pair, pair_df in ibd_segments.groupby(["id1", "id2"]):
 
-        print(ibd_segments)
+            segs.segs = pair_df
+            ibd1, ibd2 = segs.get_ibd1_ibd2()
+
+            print(ibd1, ibd2)
+
+
+
+
+        # print(ibd_segments)
 
 
 
