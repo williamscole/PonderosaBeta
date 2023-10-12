@@ -130,6 +130,20 @@ def visualize_classifiers(classif_name, classif, ax):
     elif classif_name == "nsegs":
         plot_nsegs_classifier(classif, ax)
 
+def plot_prediction(df, classif, x, y):
+    df["predicted"] = classif.predict(df[[x, y]].values)
+    df["probability"] = [max(i) for i in classif.predict_proba(df[[x, y]].values)]
+
+    fig, axs = plt.subplots(1, 2, figsize=(18, 8))
+
+    sns.scatterplot(data=df, x=x, y=y, hue="probability", ax=axs[1])
+    sns.scatterplot(data=df, x=x, y=y, hue="predicted", legend=False, alpha=0.4, ax=axs[0])
+
+    for lab, tmp in df.groupby("predicted"):
+        axs[0].text(x=tmp["ibd1"].mean(), y=tmp["ibd2"].mean(), s=lab, fontsize="medium")
+
+    return fig, axs
+
 
 # perform various computations on ibd segments for a pair of individuals
 # takes as input a phasedibd segment data frame
@@ -217,10 +231,11 @@ class ProcessSegments:
         return regions
 
     # returns ibd1, ibd2 values for the pair
-    def get_ibd1_ibd2(self):
+    def get_ibd1_ibd2(self, n=False):
 
         # init with ibd1 of 0 cM and ibd2 of 0 cM
         ibd1, ibd2 = 0, 0
+        n_ibd1, n_ibd2 = 0, 0
 
         # iterate through the chromosomes
         for chrom, chrom_df in self.segs.groupby("chromosome"):
@@ -242,9 +257,14 @@ class ProcessSegments:
                 # r is covered on all 4 haplotypes --> IBD2
                 if sum(set(hap)) == 10:
                     ibd2 += l
+                    n_ibd2 += 1
                 # not ibd2
                 else:
                     ibd1 += l
+                    n_ibd1 += 1
+        
+        if n:
+            return ibd1, n_ibd1, ibd2, n_ibd2
         
         return ibd1, ibd2
 
@@ -303,9 +323,11 @@ class ProcessSegments:
             return ponderosa
 
         # add ibd1, ibd2 data
-        ibd1, ibd2 = self.get_ibd1_ibd2()
+        ibd1, n_ibd1, ibd2, n_ibd2 = self.get_ibd1_ibd2(n=True)
         ponderosa.ibd1 = ibd1 / genome_len
         ponderosa.ibd2 = ibd2 / genome_len
+        ponderosa.n_ibd1 = n_ibd1
+        ponderosa.n_ibd2 = n_ibd2
 
         # get the number of ibd segments
         ponderosa.n = self.get_n_segments()
