@@ -1,0 +1,16 @@
+Pedigree simulator!  v1.4    (Released 20 Jan 2022)
+
+  Def file:		hs.def
+  Map file:		/users/cwilli50/ped-sim/refined_mf.simmap
+  Input VCF:		[none: no genetic data]
+  Output prefix:	hs
+
+  Random seed:		994385078
+
+  Interference file:	/users/cwilli50/ped-sim/interfere/nu_p_campbell.tsv
+
+Simulating haplotype transmissions... done.
+Printing IBD segments... done.
+Printing fam file... done.  (Do not use with PLINK data: see README.md)
+
+To simulate genetic data, must use an input VCF with 15000 founders.

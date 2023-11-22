@@ -8,6 +8,7 @@ from math import floor, ceil
 import itertools as it
 from sklearn.mixture import GaussianMixture
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+import matplotlib.pyplot as plt
 
 from pedigree_tools import ProcessSegments, PedigreeHierarchy, SiblingClassifier, TrainPonderosa
 
@@ -37,6 +38,8 @@ def get_file_names(file_name):
         return [file_name.replace("chr1", f"chr{chrom}") for chrom in range(1, 23)]
     else:
         return [file_name]
+    
+
 
 ''' SampleData is a class that holds a networkx graph where nodes are individuals
 and edges describe the relationship between those individuals. It can be queried easily

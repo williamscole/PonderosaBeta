@@ -1,0 +1,4 @@
+This directory is for the simulations to produce regions of the genome that are phased perfectly to assess the power of the haplotype score.
+
+Here's the pedsim argument used to run:
+/users/cwilli50/ped-sim/ped-sim -m /users/cwilli50/ped-sim/refined_mf.simmap --intf /users/cwilli50/ped-sim/interfere/nu_p_campbell.tsv -d hco.def -o hco --fam

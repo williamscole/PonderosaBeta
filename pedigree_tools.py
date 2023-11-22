@@ -18,6 +18,8 @@ import sys
 import concurrent.futures
 import subprocess
 from matplotlib import colors
+from networkx.drawing.nx_agraph import graphviz_layout
+import matplotlib as mpl
 
 
 def split_regions(region_dict, new_region):
@@ -279,8 +281,9 @@ class ProcessSegments:
         return n
 
     # returns the haplotype score of the pair
-    def get_h_score(self):
+    def get_h_score(self, inter_phase=False):
         hap, tot = {0:0, 1:0}, 0
+        chrom_tots = {0: [], 1: []}
 
         # iterate through the chromosome
         for _, chrom_df in self.segs.groupby("chromosome"):
@@ -310,11 +313,18 @@ class ProcessSegments:
             # for id2
             hap[1] += max(temp[3], temp[4])
 
-        # return hap score
-        h1, h2 = tot and hap[0]/tot or 0, tot and hap[1]/tot or 0
-        return h1, h2
+            chrom_tots[0].append([temp[1], temp[2]])
+            chrom_tots[1].append([temp[3], temp[4]])
 
-    def ponderosa_data(self, genome_len, empty=False):
+        t1 = sum([i[0] if inter_phase else max(i) for i in chrom_tots[0]])
+        t2 = sum([i[0] if inter_phase else max(i) for i in chrom_tots[1]])
+
+        h1 = tot and t1/tot or 0; h2 = tot and t2/tot or 0
+        # return hap score
+        # h1, h2 = tot and hap[0]/tot or 0, tot and hap[1]/tot or 0
+        return h1 if h1 > 0.5 else 1-h1, h2 if h2 > 0.5 else 1-h2
+
+    def ponderosa_data(self, genome_len, inter_phase, empty=False):
         # creates an empty class
         class ponderosa: pass
         ponderosa = ponderosa()
@@ -333,7 +343,7 @@ class ProcessSegments:
         ponderosa.n = self.get_n_segments()
 
         # get haplotype scores
-        h1, h2 = self.get_h_score()
+        h1, h2 = self.get_h_score(inter_phase)
         ponderosa.h1 = h1
         ponderosa.h2 = h2
 
@@ -407,6 +417,198 @@ def introduce_phase_error(pair_df, mean_d):
     pair_df["id2_haplotype"] = pair_df[["id2_haplotype", "n2"]].apply(lambda x: x[0] if x[1]%2 == 0 else (x[0]+1)%2, axis = 1)
 
     return pair_df
+
+
+'''
+Takes as input a file name that has two columns which are the ordered edges of the hierarchical pedigree structure.
+This has support both for holding pairwise data and probabilities for individual pairs
+'''
+class PedigreeHierarchy:
+    
+    def __init__(self, hier_file):
+
+        hier = np.loadtxt(hier_file, type=str)
+        
+        self.hier = nx.DiGraph()
+
+        self.hier.add_nodes_from([(node, {"p": int(node == "relatives"), "p_con": int(node == "relatives"), "method": "None"}) for node in it.chain(*hier)])
+        self.hier.add_edges_from(hier)
+
+        self.init_nodes = set(it.chain(*hier))
+
+        print(self.hier.nodes["relatives"])
+
+    ### This set of functions is for holding/managing/plotting the hierarchy for a pair of individuals
+    ##################################################################################################
+
+    def add_probs(self, node, **kwargs):
+        # a list of probs has been provided, not a single node
+        if type(node) == list:
+            add_list = node[:]
+        # information for a single node has been provided (along with other pos args); convert to a list    
+        else:
+            add_list = [[node, kwargs["p_con"], kwargs["method"]]]
+
+        # add the new information
+        for node, p, method in add_list:
+            self.hier.nodes[node]["p_con"] = p
+            self.hier.nodes[node]["method"] = method
+        
+    # after all probabilities have been added, cascade the probabilities down the tree
+    def compute_probs(self):
+        # iterate through each node in a breadthfirst order
+        for parent in nx.bfs_tree(self.hier, "relatives"):
+
+            # get the child nodes of the parent node
+            children = nx.descendants_at_distance(self.hier, parent, 1)
+            
+            # sum the probability of the all the children for rescaling
+            p = np.nansum([self.hier.nodes[node]["p_con"] for node in children])
+
+            if p == 0:
+                continue
+            
+            # for each child, rescale the conditional probability and compute the probability by multiply the conditional by the prob of the parent
+            for node in children:
+                self.hier.nodes[node]["p_con"] /= p
+                self.hier.nodes[node]["p"] = self.hier.nodes[node]["p_con"]*self.hier.nodes[parent]["p"]
+
+    # starting at the root, traverses the path of most probable relationships until it reaches a probability below min_p
+    def most_probable(self, min_p):
+        
+        max_node, max_p = "relatives", 1
+
+        while True:
+
+            # iterate through the children and keep track of their probs
+            probable_children = [(-1, None)]
+            for node in nx.descendants_at_distance(self.hier, max_node, 1):
+                probable_children.append([self.hier.nodes[node]["p"], node])
+
+            # sort the children by their probability
+            probable_children.sort(key=lambda x: x[0], reverse=True)
+
+            # get the highest prob of the current children
+            cur_p = probable_children[0][0]
+
+            # only continue if the current p is greater than the min
+            if cur_p < min_p:
+                break
+
+            max_p, max_node = probable_children[0]
+
+        return max_node, max_p
+ 
+    # plots the hierarchy and the associated probabilities
+    def plot_hierarchy(self, in_g, min_display_p=-1):
+
+        # remove nodes where the prob is below a certain probability
+        keep_nodes = [node for node, attr in in_g.nodes(data=True) if attr["p"] > min_display_p]
+
+        print(keep_nodes)
+        g = in_g.subgraph(sorted(keep_nodes))
+
+        # get the position of the nodes
+        pos = graphviz_layout(g, prog='dot')
+
+        # get max number of nodes per level
+        level_size = Counter([y_coord for _,(_, y_coord) in pos.items()])
+        max_width = sorted([num for _, num in level_size.items()], reverse=True)[0]
+
+        # set the size of the plot according to the max width of the tree
+        f, ax = plt.subplots(figsize=(1.8*max_width, 1.8*max_width))
+
+        # draw the edges
+        for i, j in g.edges:
+            x1, y1 = pos[i]; x2, y2 = pos[j]
+            ax.plot([x1, x2], [y1, y2], color="black", zorder=0)
+
+        # colormap used for choosing the color of the nodes
+        cmap = mpl.colormaps['autumn_r'].resampled(8)
+
+        # add the probabilities
+        for node, coords in pos.items():
+            pos[node] = list(coords) + [g.nodes[node]["p"], g.nodes[node]["p_con"], g.nodes[node]["method"]]
+
+        # plot the nodes and their probabilities
+        for lab, (x, y, p, p_con, method) in pos.items():
+            ax.text(x, y, lab + f"\n{round(p, 3)}\n{method}\n{round(p_con, 3)}", color="black", va='center', ha='center', 
+            bbox=dict(edgecolor=cmap(float(p)), facecolor='white', boxstyle='round'))
+
+        # minor graph aspects
+        ax.set_aspect(1)
+        ax.axis('off')
+
+    # plots the probability tree for the degree
+    def plot_degree(self, show_zero_p):
+
+        g = self.hier.subgraph(nx.descendants_at_distance(self.hier, "relatives", 1) | {"relatives"})
+
+        self.plot_hierarchy(g, -1 if show_zero_p else 0.0)
+
+    # plots the probability tree for second degree relatives
+    def plot_second(self, show_zero_p):
+
+        g = self.hier.subgraph(nx.descendants(self.hier, "2nd") | {"2nd"})
+
+        self.plot_hierarchy(g, -1 if show_zero_p else 0.0)
+
+    # plots the entire hierarchy
+    def plot_all(self, show_zero_p):
+
+        self.plot_hierarchy(self.hier, -1 if show_zero_p else 0.0)
+
+    ### This set of functions is for holding pairs known relatives
+    ##################################################################################################
+
+    # adds a pair of relatives
+    def add_pair(self, pair, rel, attrs):
+        # add the edge
+        self.hier.add_edge(rel, pair)
+
+        # add the pair attributes
+        for attr, attr_val in attrs.items():
+            self.hier.nodes[pair][attr] = attr_val
+
+    # add pairs from a list of individuals
+    def add_pairs_from(self, pair_list):
+        for pair, rel, attrs in pair_list:
+            self.add_pair(pair, rel, attrs)
+
+    # given a relationship, returns the the relative pairs under that relationship
+    def get_pairs(self, node):
+        return nx.descendants(self.hier, node) - self.init_nodes
+    
+    # given a parent node, returns a df with all the descendant nodes and all attributes they have as columns
+    def get_pair_df(self, node):
+
+        # get the pairs who are descendant pairs
+        pair_list = list(self.get_pairs(node))
+
+        # holds all columns and column values
+        columns = {"pair": pair_list,
+                   "degree": [nx.shortest_path(self.hier, "relatives", node)[1] for node in pair_list],
+                   "rel": [next(self.hier.predecessors(node)) for node in pair_list]}
+
+        # iterate through each person and add
+        for index, pair in enumerate(pair_list):
+            for attr, val in self.hier.nodes[pair].items():
+                # attribute does not exist yet, so add it
+                if attr not in columns:
+                    columns[attr] = list(np.arange(len(pair_list)) * np.nan)
+
+                # add the attribute
+                columns[attr][index] = val
+
+        return pd.DataFrame(columns)
+
+    def get_relative_nodes(self, node, include=False):
+        return (nx.descendants(self.hier, node) & self.init_nodes) | ({node} if include else set())
+
+    # given a list of relationship nodes, returns all pairs under
+    def get_nodes_from_list(self, node_list):
+        return set(it.chain(*[list(self.get_pairs(node)) for node in node_list]))
+    
 
 class PedigreeHierarchy:
     
@@ -1984,3 +2186,4 @@ if __name__ == "__main__":
         p = PedSims("")
         p.subset_vcf(sys.argv[-3], sys.argv[-2])
         
+
