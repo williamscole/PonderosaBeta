@@ -4,6 +4,7 @@ import itertools as it
 import numpy as np
 from datetime import datetime
 import time
+import yaml
 from math import floor, ceil
 # import phasedibd as ibd
 import os
@@ -427,16 +428,29 @@ class PedigreeHierarchy:
     
     def __init__(self, hier_file):
 
-        hier = np.loadtxt(hier_file, type=str)
-        
-        self.hier = nx.DiGraph()
+        def create_digraph(yaml_file):
+            # open yaml file
+            i = open(yaml_file, "r")
+            y = yaml.safe_load(i)
 
-        self.hier.add_nodes_from([(node, {"p": int(node == "relatives"), "p_con": int(node == "relatives"), "method": "None"}) for node in it.chain(*hier)])
-        self.hier.add_edges_from(hier)
+            # get the edges
+            edges = [[data.get("parent", data["degree"]), r] for r, data in y.items()]
 
-        self.init_nodes = set(it.chain(*hier))
+            # init graph and add the nodes
+            g = nx.DiGraph()
+            g.add_nodes_from([(node, {"p": np.nan, "p_con": np.nan, "method": "None"}) for node in it.chain(*edges)])
+            g.add_edges_from(edges)
 
-        print(self.hier.nodes["relatives"])
+            # get relationships that are roots and add a root to root all the subtrees
+            roots = [nodes for nodes in g.nodes if g.in_degree(nodes)==0]
+            g.add_node("relatives", p=1, p_con=1, method="None")
+            g.add_edges_from([["relatives", nodes] for nodes in roots])
+
+            return g
+            
+        self.hier = create_digraph(hier_file)
+
+        self.init_nodes = set(it.chain(*self.hier))
 
     ### This set of functions is for holding/managing/plotting the hierarchy for a pair of individuals
     ##################################################################################################
@@ -610,76 +624,76 @@ class PedigreeHierarchy:
         return set(it.chain(*[list(self.get_pairs(node)) for node in node_list]))
     
 
-class PedigreeHierarchy:
+# class PedigreeHierarchy:
     
-    def __init__(self, hier = []):
+#     def __init__(self, hier = []):
         
-        # no specified hierarchy supplied
-        if len(hier) == 0:
-            hier = [["relatives", "1st"],
-                    ["relatives", "2nd"],
-                    ["relatives", "3rd"],
-                    ["relatives", "4th"],
-                    ["relatives", "MZ"],
-                    ["1st", "PO"],
-                    ["1st", "FS"],
-                    ["2nd", "GP/AV"],
-                    ["GP/AV", "GP"],
-                    ["GP", "MGP"],
-                    ["GP", "PGP"],
-                    ["2nd", "DCO"],
-                    ["2nd", "HS"],
-                    ["HS", "MHS"],
-                    ["HS", "PHS"],
-                    ["GP/AV", "AV"],
-                    ["3rd", "CO"],
-                    ["3rd", "DHCO"],
-                    ["3rd", "GGP"],
-                    ["GGP", "MGGP"],
-                    ["GGP", "PGGP"],
-                    ["3rd", "HAV"],
-                    ["HAV", "MHAV1"],
-                    ["HAV", "MHAV2"],
-                    ["HAV", "PHAV1"],
-                    ["HAV", "PHAV2"],
-                    ["4th", "HCO"],
-                    ["HCO", "MHCO"],
-                    ["HCO", "PHCO"],
-                    ["4th", "CORM"],
-                    ["4th", "GGGP"]]
+#         # no specified hierarchy supplied
+#         if len(hier) == 0:
+#             hier = [["relatives", "1st"],
+#                     ["relatives", "2nd"],
+#                     ["relatives", "3rd"],
+#                     ["relatives", "4th"],
+#                     ["relatives", "MZ"],
+#                     ["1st", "PO"],
+#                     ["1st", "FS"],
+#                     ["2nd", "GP/AV"],
+#                     ["GP/AV", "GP"],
+#                     ["GP", "MGP"],
+#                     ["GP", "PGP"],
+#                     ["2nd", "DCO"],
+#                     ["2nd", "HS"],
+#                     ["HS", "MHS"],
+#                     ["HS", "PHS"],
+#                     ["GP/AV", "AV"],
+#                     ["3rd", "CO"],
+#                     ["3rd", "DHCO"],
+#                     ["3rd", "GGP"],
+#                     ["GGP", "MGGP"],
+#                     ["GGP", "PGGP"],
+#                     ["3rd", "HAV"],
+#                     ["HAV", "MHAV1"],
+#                     ["HAV", "MHAV2"],
+#                     ["HAV", "PHAV1"],
+#                     ["HAV", "PHAV2"],
+#                     ["4th", "HCO"],
+#                     ["HCO", "MHCO"],
+#                     ["HCO", "PHCO"],
+#                     ["4th", "CORM"],
+#                     ["4th", "GGGP"]]
             
-        self.hier = nx.DiGraph()
-        self.hier.add_edges_from(hier)
-        self.init_nodes = set(self.hier.nodes)
+#         self.hier = nx.DiGraph()
+#         self.hier.add_edges_from(hier)
+#         self.init_nodes = set(self.hier.nodes)
     
-    # child_node is the relative pair, parent_node is the relationship they fall under
-    def add_relative(self, parent_node, child_node):
-        self.hier.add_edge(parent_node, child_node)
+#     # child_node is the relative pair, parent_node is the relationship they fall under
+#     def add_relative(self, parent_node, child_node):
+#         self.hier.add_edge(parent_node, child_node)
     
-    # given a relationship, returns the the relative pairs under that relationship
-    # pairs is True --> returns paired tuples; pairs is False --> returns relative nodes
-    def get_nodes(self, node):
-        return nx.descendants(self.hier, node) - self.init_nodes
+#     # given a relationship, returns the the relative pairs under that relationship
+#     # pairs is True --> returns paired tuples; pairs is False --> returns relative nodes
+#     def get_nodes(self, node):
+#         return nx.descendants(self.hier, node) - self.init_nodes
 
-    def get_pairs(self, node):
-        return nx.descendants(self.hier, node) - self.init_nodes
+#     def get_pairs(self, node):
+#         return nx.descendants(self.hier, node) - self.init_nodes
 
-    def get_relative_nodes(self, node, include=False):
-        return (nx.descendants(self.hier, node) & self.init_nodes) | ({node} if include else set())
+#     def get_relative_nodes(self, node, include=False):
+#         return (nx.descendants(self.hier, node) & self.init_nodes) | ({node} if include else set())
 
-    # given a list of relationship nodes, returns all pairs under
-    def get_nodes_from_list(self, node_list):
-        return set(it.chain(*[list(self.get_nodes(node)) for node in node_list]))
+#     # given a list of relationship nodes, returns all pairs under
+#     def get_nodes_from_list(self, node_list):
+#         return set(it.chain(*[list(self.get_nodes(node)) for node in node_list]))
 
-    # adds a single attributes to the nodes in the dict
-    # attrs is a dict like {rel1: attr1, rel2: attr2} and attr_name is the name of the attr
-    def set_attrs(self, attrs, attr_name):
-        for node, attr in attrs.items():
-            self.hier.nodes[node][attr_name] = attr
+#     # adds a single attributes to the nodes in the dict
+#     # attrs is a dict like {rel1: attr1, rel2: attr2} and attr_name is the name of the attr
+#     def set_attrs(self, attrs, attr_name):
+#         for node, attr in attrs.items():
+#             self.hier.nodes[node][attr_name] = attr
         
-    # returns the hierarchy structure
-    def get_hierarchy(self):
-        return self.hier
+#     # returns the hierarchy structure
+#     def get_hierarchy(self):
+#         return self.hier
     
     
 class TrainPonderosa:

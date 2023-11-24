@@ -55,11 +55,11 @@ class SampleData:
         ### init the graph and set defaults
         g = nx.Graph()
         g.add_nodes_from(fam.apply(lambda x: (x[1], {"sex": x[4],
-                                                    "mother": x[3] if x[3] != "0" else None,
-                                                    "father": x[2] if x[2] != "0" else None,
+                                                    "mother": x[3] if x[3] != "0" else np.nan,
+                                                    "father": x[2] if x[2] != "0" else np.nan,
                                                     "children": [],
                                                     "age": np.nan,
-                                                    "pop": "pop1"}), axis=1).values)
+                                                    "popl": "pop1"}), axis=1).values)
 
         ### get the population
         popln = kwargs.get("population", "pop1")
@@ -78,7 +78,9 @@ class SampleData:
         if os.path.exists(pop_file):
             pops = pd.read_csv(pop_file, delim_whitespace=True, dtype=str, header=None)
             pop_attrs = {iid: pop for iid, pop in pops[[0,1]].values}
-            nx.set_node_attributes(g, pop_attrs, "pop")
+            nx.set_node_attributes(g, pop_attrs, "popl")
+        else:
+            print("No population file has been provided.")
 
         # add age data
         age_file = kwargs.get("age_file", "")
@@ -101,14 +103,36 @@ class SampleData:
                 genome_len += (chrom_df.iloc[-1][2] - chrom_df.iloc[0][2])
         # no map files provided, use default genome length
         else:
-            print("No map files have been provided.")
-            genome_len = 3500
+            print("No map files have been provided. Assuming genome length of 3545 cM.")
+            genome_len = 3545
+                # store the genome_len
 
-        # store the genome_len
         self.genome_len = genome_len
+
+        ### load the king file
+        king_file = kwargs.get("king_file", "")
+        if os.path.exists(king_file):
+            king_df = pd.read_csv(king_file, delim_whitespace=True, dtype={"ID1": str, "ID2": str})
+
+            # get set of MZ twins; remove the 2nd twin in the pair
+            mz_twins = set(king_df[king_df.InfType=="Dup/MZ"]["ID2"].values.tolist())
+
+            # create an IBD graph and add var attrs to it
+            g.add_edges_from(king_df.apply(lambda x: [x.ID1, x.ID2, 
+                                                {"k_prop": x.PropIBD,
+                                                "k_ibd1": x.IBD1Seg,
+                                                "k_ibd2": x.IBD2Seg,
+                                                "k_degree": x.InfType}],
+                                                axis=1).values)
+
+        ### subset to only samples from the population and who are not part of the twin set
+        popl_samples = {nodes for nodes, attrs in g.nodes(data=True) if attrs.get("popl", "")==popln}
+        self.g = g.subgraph(popl_samples - mz_twins)
+
 
         ### load ibd, process ibd segs
         ibd_file = kwargs.get("ibd_file", "")
+        code_yaml = kwargs.get("code_yaml", "relationship_codes.yaml")
         if os.path.exists(ibd_file):
             print("Processing IBD segments...")
             ibd_files = get_file_names(ibd_file)
@@ -119,32 +143,22 @@ class SampleData:
             ibd_df["l"] = ibd_df["end_cm"] - ibd_df["start_cm"]
 
             # iterate through the pairs of individuals, compute ibd stats
-            n_pairs = 0
-            tot_pairs = len([1 for _ in ibd_df.groupby(["id1", "id2"])])
             for (id1, id2), pair_df in ibd_df.groupby(["id1", "id2"]):
 
-                # if distant relative or nodes not in the fam file, ignore
-                if ibd_df["l"].sum() < 100\
-                    or id1 not in g.nodes\
-                    or id2 not in g.nodes\
-                    or id1 == id2\
-                    or g.nodes[id1]["pop"] != popln\
-                    or g.nodes[id2]["pop"] != popln:
+                # only compute hsr, other stats for 3rd+ degree relatives
+                k = self.g.get_edge_data(id1, id2, {}).get("k", 0)
+
+                # 2^-3.5 is the lower limit for 3rd degree relatives
+                if k < 2**-3.5:
                     continue
 
                 pair_ibd = ProcessSegments(pair_df)
                 ibd_data = pair_ibd.ponderosa_data(genome_len)
 
                 # set up the pedigree hierarchy, which will store the probs and info on how the probs were computed
-                hier = PedigreeHierarchy()
-                hier.set_attrs({i: np.nan for i in hier.init_nodes}, "p")
-                hier.set_attrs({i: np.nan for i in hier.init_nodes}, "post")
-                hier.set_attrs({i: None for i in hier.init_nodes}, "method")
+                hier = PedigreeHierarchy(code_yaml)
                 hier.set_attrs({i: tuple(sorted([id1, id2])) for i in hier.init_nodes}, "ordering")
                 hier.set_attrs({i: "sorted" for i in hier.init_nodes}, "ordering_method")
-                # set the root post prob to 1
-                hier.hier.nodes["relatives"]["post"] = 1
-                hier.hier.nodes["relatives"]["p"] = 1
 
                 # add ibd1 data and initialze probs
                 g.add_edge(id1, id2, ibd1=ibd_data.ibd1,
@@ -155,26 +169,10 @@ class SampleData:
                                      probs=hier,
                                      segments=pair_df)
 
-                # check to see if parents
-                if ibd_data.ibd1 > 0.8:
-                    hier.set_attrs({"1st": 1, "PO": 1, "FS": 0}, "p")
-
-                # check if MZ twins
-                if ibd_data.ibd2 > 0.90:
-                    hier.set_attrs({"MZ": 1}, "p")
-
-                n_pairs += 1
-                if n_pairs % 100 == 0:
-                    print(f"{n_pairs} of {tot_pairs} pairs processed.")
-
-                if n_pairs > kwargs.get("n_pairs", np.inf):
-                    break
-
         else:
             print("No IBD files have been provided.")
 
         self.g = g
-
 
     # returns a list of node pair edges
     # optional func arg is a function that takes as input the data dict and returns true if wanted
@@ -215,6 +213,12 @@ class SampleData:
         for (id1, id2), probs in zip(pair_list, probs_list):
             self.g.edges[id1, id2]["probs"].set_attrs({i: p for i,p in zip(prob_labs, probs)}, "p")
             self.g.edges[id1, id2]["probs"].set_attrs({i: method for i in prob_labs}, "method")
+
+    def node_attr(self, node, attr, nan=np.nan):
+        try:
+            return self.g.nodes[node][attr]
+        except:
+            return nan
 
 
 class Pedigree:
