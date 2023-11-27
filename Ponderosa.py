@@ -11,7 +11,7 @@ from sklearn.mixture import GaussianMixture
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 import matplotlib.pyplot as plt
 
-from pedigree_tools import ProcessSegments, PedigreeHierarchy, SiblingClassifier, TrainPonderosa
+from pedigree_tools import ProcessSegments, PedigreeHierarchy, SiblingClassifier, TrainPonderosa, introduce_phase_error
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -153,8 +153,13 @@ class SampleData:
                 if k < 2**-3.5:
                     continue
 
+                # compute the IBD data
                 pair_ibd = ProcessSegments(pair_df)
                 ibd_data = pair_ibd.ponderosa_data(genome_len)
+
+                # add phase errors
+                pair_ibd.pair_df = introduce_phase_error(pair_df, 50)
+                ibd_data_pe = pair_ibd.ponderosa_data(genome_len)
 
                 # set up the pedigree hierarchy, which will store the probs and info on how the probs were computed
                 hier = PedigreeHierarchy(code_yaml)
@@ -165,6 +170,7 @@ class SampleData:
                 g.add_edge(id1, id2, ibd1=ibd_data.ibd1,
                                      ibd2=ibd_data.ibd2,
                                      h={id1: ibd_data.h1, id2: ibd_data.h2},
+                                     h_pe={id1: ibd_data_pe.h1, id2: ibd_data_pe.h2}
                                      n=ibd_data.n,
                                      k=(ibd_data.ibd1/2 + ibd_data.ibd2),
                                      probs=hier,
