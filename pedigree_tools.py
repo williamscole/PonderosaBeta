@@ -615,8 +615,14 @@ class PedigreeHierarchy:
 
                 # add the attribute
                 columns[attr][index] = val
+        
+        # create the df
+        out_df = pd.DataFrame(columns)
 
-        return pd.DataFrame(columns)
+        # add a col with the requested node
+        out_df["requested"] = node
+
+        return out_df
 
     def get_relative_nodes(self, node, include=False):
         return (nx.descendants(self.hier, node) & self.init_nodes) | ({node} if include else set())
