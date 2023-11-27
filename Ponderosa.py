@@ -170,7 +170,7 @@ class SampleData:
                 g.add_edge(id1, id2, ibd1=ibd_data.ibd1,
                                      ibd2=ibd_data.ibd2,
                                      h={id1: ibd_data.h1, id2: ibd_data.h2},
-                                     h_pe={id1: ibd_data_pe.h1, id2: ibd_data_pe.h2}
+                                     h_pe={id1: ibd_data_pe.h1, id2: ibd_data_pe.h2},
                                      n=ibd_data.n,
                                      k=(ibd_data.ibd1/2 + ibd_data.ibd2),
                                      probs=hier,
