@@ -147,7 +147,7 @@ class SampleData:
             for (id1, id2), pair_df in ibd_df.groupby(["id1", "id2"]):
 
                 # only compute hsr, other stats for 3rd+ degree relatives
-                k = self.g.get_edge_data(id1, id2, {}).get("k", 0)
+                k = self.g.get_edge_data(id1, id2, {}).get("k_prop", 0)
 
                 # 2^-3.5 is the lower limit for 3rd degree relatives
                 if k < 2**-3.5:
@@ -155,31 +155,44 @@ class SampleData:
 
                 # compute the IBD data
                 pair_ibd = ProcessSegments(pair_df)
-                ibd_data = pair_ibd.ponderosa_data(genome_len)
+                ibd_data = pair_ibd.ponderosa_data(genome_len, inter_phase=False)
 
                 # add phase errors
-                pair_ibd.pair_df = introduce_phase_error(pair_df, 50)
-                ibd_data_pe = pair_ibd.ponderosa_data(genome_len)
+                pair_ibd_pe = ProcessSegments(introduce_phase_error(pair_df, 50))
+                ibd_data_pe = pair_ibd_pe.ponderosa_data(genome_len, inter_phase=False)
 
                 # set up the pedigree hierarchy, which will store the probs and info on how the probs were computed
                 hier = PedigreeHierarchy(code_yaml)
-                hier.set_attrs({i: tuple(sorted([id1, id2])) for i in hier.init_nodes}, "ordering")
-                hier.set_attrs({i: "sorted" for i in hier.init_nodes}, "ordering_method")
+                hier.update_attr_from([[node, "ordering", sorted([id1, id2])] for node in hier.init_nodes])
+                hier.update_attr_from([[node, "ordering_method", "sorted"] for node in hier.init_nodes])
+                # ({i: tuple(sorted([id1, id2])) for i in hier.init_nodes}, "ordering")
+                # hier.set_attrs({i: "sorted" for i in hier.init_nodes}, "ordering_method")
 
-                # add ibd1 data and initialze probs
-                g.add_edge(id1, id2, ibd1=ibd_data.ibd1,
-                                     ibd2=ibd_data.ibd2,
-                                     h={id1: ibd_data.h1, id2: ibd_data.h2},
-                                     h_pe={id1: ibd_data_pe.h1, id2: ibd_data_pe.h2},
-                                     n=ibd_data.n,
-                                     k=(ibd_data.ibd1/2 + ibd_data.ibd2),
-                                     probs=hier,
-                                     segments=pair_df)
+                cur_edge_data = self.g.get_edge_data(id1, id2)
+
+
+                cur_edge_data["ibd1"] = ibd_data.ibd1
+                cur_edge_data["ibd2"] = ibd_data.ibd2
+                cur_edge_data["h"] = {id1: ibd_data.h1, id2: ibd_data.h2}
+                cur_edge_data["h_error"] = {id1: ibd_data_pe.h1, id2: ibd_data_pe.h2}
+                cur_edge_data["n"] = ibd_data.n
+                cur_edge_data["hier"] = hier
+
+                print(self.g.get_edge_data(id1, id2))
+
+                # # add ibd1 data and initialze probs
+                # self.g.add_edge(id1, id2, ibd1=ibd_data.ibd1,
+                #                      ibd2=ibd_data.ibd2,
+                #                      h={id1: ibd_data.h1, id2: ibd_data.h2},
+                #                      h_pe={id1: ibd_data_pe.h1, id2: ibd_data_pe.h2},
+                #                      n=ibd_data.n,
+                #                      k=(ibd_data.ibd1/2 + ibd_data.ibd2),
+                #                      probs=hier,
+                #                      segments=pair_df)
 
         else:
             print("No IBD files have been provided.")
 
-        self.g = g
 
     # returns a list of node pair edges
     # optional func arg is a function that takes as input the data dict and returns true if wanted

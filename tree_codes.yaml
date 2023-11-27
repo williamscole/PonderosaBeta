@@ -41,12 +41,14 @@ AV:
     - [1, 1, -1]
   sex: false
   parent: GPAV
+  degree: 2nd
 
 GP:
   1:
     - [1, 1]
   sex: false
   parent: GPAV
+  degree: 2nd
 
 PGP:
   1:
