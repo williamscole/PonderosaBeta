@@ -591,6 +591,15 @@ class PedigreeHierarchy:
         for pair, rel, attrs in pair_list:
             self.add_pair(pair, rel, attrs)
 
+    # add/update an attribute
+    def update_attr(self, pair, attr, val):
+        self.hier.nodes[pair][attr] = val
+
+    # add/update an attribute from a list
+    def update_attr_from(self, pair_list):
+        for pair, attr, val in pair_list:
+            self.update_attr(pair, attr, val)
+
     # given a relationship, returns the the relative pairs under that relationship
     def get_pairs(self, node):
         return nx.descendants(self.hier, node) - self.init_nodes
