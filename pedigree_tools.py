@@ -628,11 +628,11 @@ class PedigreeHierarchy:
         return (nx.descendants(self.hier, node) & self.init_nodes) | ({node} if include else set())
 
     # given a list of relationship nodes, returns all pairs under
-    def get_nodes_from_list(self, node_list):
+    def get_nodes_from(self, node_list):
         return set(it.chain(*[list(self.get_pairs(node)) for node in node_list]))
 
     # given a list of nodes, returns a dataframe of all the attrs of the pairs
-    def get_pair_df_from_list(self, node_list):
+    def get_pair_df_from(self, node_list):
         return pd.concat([self.get_pair_df(node) for node in node_list]).reset_index(drop=True)
     
 
