@@ -3,6 +3,7 @@ import networkx as nx
 import yaml
 import itertools as it
 from collections import Counter
+import pickle as pkl
 
 from Ponderosa import SampleData
 from pedigree_tools import PedigreeHierarchy, Pedigree
@@ -203,16 +204,21 @@ from pedigree_tools import PedigreeHierarchy, Pedigree
 #             print(f"{n} of the following were found:")
 #             print(unkr + "\n")
         
-samples = SampleData(fam_file="for_dev/Himba_missing.fam",
-                     king_file="for_dev/King_Relatedness_no2278.seg",
-                     ibd_file="for_dev/Himba_shapeit.chr1_segments.txt",
-                     map_file="for_dev/newHimba_shapeit.chr1.map",
-                     code_yaml="tree_codes.yaml")
+# samples = SampleData(fam_file="for_dev/Himba_missing.fam",
+#                      king_file="for_dev/King_Relatedness_no2278.seg",
+#                      ibd_file="for_dev/Himba_shapeit.chr1_segments.txt",
+#                      map_file="for_dev/newHimba_shapeit.chr1.map",
+#                      code_yaml="tree_codes.yaml")
 
-# yaml_file = "pedigree_codes.yaml"
-# Ped = Pedigree(samples=samples, yaml_file=yaml_file)
+
+i = open("for_dev/sample.pkl", "rb")
+samples = pkl.load(i)
+
+
+
+yaml_file = "pedigree_codes.yaml"
+Ped = Pedigree(samples=samples, yaml_file=yaml_file)
+import pdb; pdb.set_trace()
 # Ped.find_all_relationships()
 
-
-import pdb; pdb.set_trace()
 

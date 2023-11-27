@@ -56,8 +56,8 @@ class SampleData:
         ### init the graph and set defaults
         g = nx.Graph()
         g.add_nodes_from(fam.apply(lambda x: (x[1], {"sex": x[4],
-                                                    "mother": x[3] if x[3] != "0" else np.nan,
-                                                    "father": x[2] if x[2] != "0" else np.nan,
+                                                    "mother": x[3] if x[3] != "0" else -1,
+                                                    "father": x[2] if x[2] != "0" else -1,
                                                     "children": [],
                                                     "age": np.nan,
                                                     "popl": "pop1"}), axis=1).values)

@@ -736,10 +736,10 @@ class Pedigree:
     def __init__(self, **kwargs):
 
         po_list = kwargs.get("po_list", [])
-        samples_g = kwargs.get("samples", None)
+        samples = kwargs.get("samples", None)
 
         # store the samples g
-        self.g = samples_g.g
+        self.g = samples.g
 
         # a list of po-pairs has been supplied
         if len(po_list) > 0:
@@ -747,10 +747,10 @@ class Pedigree:
             po.add_edges_from(po_list)
 
         # samples graph has been supplied
-        elif len(samples_g.g.nodes) > 0:
+        elif len(self.g.nodes) > 0:
             tmp = nx.DiGraph()
-            tmp.add_edges_from(it.chain(*[[[data["mother"], node], [data["father"], node]] for node, data in samples_g.g.nodes(data=True)]))
-            po = tmp.subgraph(set(tmp.nodes) - {np.nan})
+            tmp.add_edges_from(it.chain(*[[[data["mother"], node], [data["father"], node]] for node, data in self.g.nodes(data=True)]))
+            po = tmp.subgraph(set(tmp.nodes) - {-1})
 
         self.po = po
 
