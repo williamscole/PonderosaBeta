@@ -450,7 +450,7 @@ class PedigreeHierarchy:
             
         self.hier = create_digraph(hier_file)
 
-        self.init_nodes = set(it.chain(*self.hier))
+        self.init_nodes = set(self.hier.nodes)
 
         self.degree_nodes = list(self.hier.successors("relatives"))
 
@@ -521,7 +521,6 @@ class PedigreeHierarchy:
         # remove nodes where the prob is below a certain probability
         keep_nodes = [node for node, attr in in_g.nodes(data=True) if attr["p"] > min_display_p]
 
-        print(keep_nodes)
         g = in_g.subgraph(sorted(keep_nodes))
 
         # get the position of the nodes

@@ -165,8 +165,6 @@ class SampleData:
                 hier = PedigreeHierarchy(code_yaml)
                 hier.update_attr_from([[node, "ordering", sorted([id1, id2])] for node in hier.init_nodes])
                 hier.update_attr_from([[node, "ordering_method", "sorted"] for node in hier.init_nodes])
-                # ({i: tuple(sorted([id1, id2])) for i in hier.init_nodes}, "ordering")
-                # hier.set_attrs({i: "sorted" for i in hier.init_nodes}, "ordering_method")
 
                 cur_edge_data = self.g.get_edge_data(id1, id2)
 
@@ -176,9 +174,8 @@ class SampleData:
                 cur_edge_data["h"] = {id1: ibd_data.h1, id2: ibd_data.h2}
                 cur_edge_data["h_error"] = {id1: ibd_data_pe.h1, id2: ibd_data_pe.h2}
                 cur_edge_data["n"] = ibd_data.n
-                cur_edge_data["hier"] = hier
+                cur_edge_data["probs"] = hier
 
-                print(self.g.get_edge_data(id1, id2))
 
                 # # add ibd1 data and initialze probs
                 # self.g.add_edge(id1, id2, ibd1=ibd_data.ibd1,

@@ -5,7 +5,7 @@ import itertools as it
 from collections import Counter
 
 from Ponderosa import SampleData
-from pedigree_tools import PedigreeHierarchy
+from pedigree_tools import PedigreeHierarchy, Pedigree
 
 
 # class Relationship:
@@ -204,10 +204,14 @@ from pedigree_tools import PedigreeHierarchy
 #             print(unkr + "\n")
         
 samples = SampleData(fam_file="for_dev/Himba_allPO.fam",
-                     king_file="for_dev/King_Relatedness_no2278.seg")
+                     king_file="for_dev/King_Relatedness_no2278.seg",
+                     ibd_file="for_dev/Himba_shapeit.chr1_segments.txt",
+                     map_file="for_dev/newHimba_shapeit.chr1.map",
+                     code_yaml="tree_codes.yaml")
 
-import pdb; pdb.set_trace()
-# yaml_file = "relationship_codes.yaml"
+# yaml_file = "pedigree_codes.yaml"
 # Ped = Pedigree(samples=samples, yaml_file=yaml_file)
 # Ped.find_all_relationships()
+
+import pdb; pdb.set_trace()
 
