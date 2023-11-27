@@ -452,6 +452,8 @@ class PedigreeHierarchy:
 
         self.init_nodes = set(it.chain(*self.hier))
 
+        self.degree_nodes = list(self.hier.successors("relatives"))
+
     ### This set of functions is for holding/managing/plotting the hierarchy for a pair of individuals
     ##################################################################################################
 
