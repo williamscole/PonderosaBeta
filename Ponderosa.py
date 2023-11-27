@@ -4,6 +4,7 @@ import pickle as pkl
 import networkx as nx
 import argparse
 import os
+from collections import Counter
 from math import floor, ceil
 import itertools as it
 from sklearn.mixture import GaussianMixture
@@ -221,218 +222,327 @@ class SampleData:
             return nan
 
 
-class Pedigree:
-    '''Takes as input a networkx graph where nodes have attributes:
-        children: list
-        father: str (None if missing)
-        mother: str (None if missing)
-        age: float (np.nan if missing)
-        sex: str ("1" if male "2" if female)'''
-    def __init__(self, g, degree_classifier=None):
+# class Pedigree:
+#     '''Takes as input a networkx graph where nodes have attributes:
+#         children: list
+#         father: str (None if missing)
+#         mother: str (None if missing)
+#         age: float (np.nan if missing)
+#         sex: str ("1" if male "2" if female)'''
+#     def __init__(self, g, degree_classifier=None):
 
-        # specify the relationships
-        # rels = {"relatives": ["1st", "2nd", "3rd", "4th"],
-        #         "1st": ["PO", "FS"], "2nd": ["HS", "GPAV", "DCO"], "3rd": ["CO", "GGP", "HAV", "DHCO"], "4th": ["HCO", "GGGP"], "GPAV": ["GP", "AV"],
-        #         "GP": ["MGP", "PGP"], "HS": ["MHS", "PHS"]}
+#         # specify the relationships
+#         # rels = {"relatives": ["1st", "2nd", "3rd", "4th"],
+#         #         "1st": ["PO", "FS"], "2nd": ["HS", "GPAV", "DCO"], "3rd": ["CO", "GGP", "HAV", "DHCO"], "4th": ["HCO", "GGGP"], "GPAV": ["GP", "AV"],
+#         #         "GP": ["MGP", "PGP"], "HS": ["MHS", "PHS"]}
 
-        # init pedigree obj to store the relationships
-        # self.rels = PedigreeHierarchy(hier=list(it.chain(*[[[parent, child] for child in child_l] for parent, child_l in rels.items()])))
-        self.pairs = PedigreeHierarchy()
-        # set attributes 
-        # self.rels.set_attrs({i: set() for i in self.rels.get_nodes("relatives")}, "pairs")
+#         # init pedigree obj to store the relationships
+#         # self.rels = PedigreeHierarchy(hier=list(it.chain(*[[[parent, child] for child in child_l] for parent, child_l in rels.items()])))
+#         self.pairs = PedigreeHierarchy()
+#         # set attributes 
+#         # self.rels.set_attrs({i: set() for i in self.rels.get_nodes("relatives")}, "pairs")
 
-        # pedigree object is a directed graph which directs parent --> child
-        ped = nx.DiGraph()
-        ped.add_nodes_from(g.nodes)
+#         # pedigree object is a directed graph which directs parent --> child
+#         ped = nx.DiGraph()
+#         ped.add_nodes_from(g.nodes)
 
-        # iterate through the nodes in the input graph and add their parental edges
-        for node, attrs in g.nodes(data=True):
-            # info about their relatives
-            mother = attrs["mother"]; father = attrs["father"]; children = attrs["children"]
+#         # iterate through the nodes in the input graph and add their parental edges
+#         for node, attrs in g.nodes(data=True):
+#             # info about their relatives
+#             mother = attrs["mother"]; father = attrs["father"]; children = attrs["children"]
 
-            # age and sex info
-            age = attrs["age"]; sex = attrs["sex"]
+#             # age and sex info
+#             age = attrs["age"]; sex = attrs["sex"]
 
-            # set attrs
-            ped.nodes[node]["age"] = age
-            ped.nodes[node]["sex"] = sex
+#             # set attrs
+#             ped.nodes[node]["age"] = age
+#             ped.nodes[node]["sex"] = sex
 
-            # list of all the PO relationships to add
-            po_list = [[father, node], [mother, node]] + [[node, child] for child in children]
+#             # list of all the PO relationships to add
+#             po_list = [[father, node], [mother, node]] + [[node, child] for child in children]
 
-            # iterate through the list
-            for parent, child in po_list:
-                # add the nodes; parent node may be None, in which case it is renamed to "remove"
-                ped.add_edge({parent: parent, None: "remove"}[parent], child)
+#             # iterate through the list
+#             for parent, child in po_list:
+#                 # add the nodes; parent node may be None, in which case it is renamed to "remove"
+#                 ped.add_edge({parent: parent, None: "remove"}[parent], child)
 
-        # remove the remove dummy node and assign to the class
-        self.dummy, self.ped = SiblingClassifier(ped.subgraph(set(ped.nodes) - {"remove"}), g, 0, degree_classifier)
+#         # remove the remove dummy node and assign to the class
+#         self.dummy, self.ped = SiblingClassifier(ped.subgraph(set(ped.nodes) - {"remove"}), g, 0, degree_classifier)
 
 
-    # adds a pair to a relationship category
-    def add_pair(self, id1, id2, rel):
-        # add the pair
-        self.pairs.add_relative(rel, (id1, id2))
-        # self.rels.hier.nodes[rel]["pairs"] |= {(id1, id2)}
+#     # adds a pair to a relationship category
+#     def add_pair(self, id1, id2, rel):
+#         # add the pair
+#         self.pairs.add_relative(rel, (id1, id2))
+#         # self.rels.hier.nodes[rel]["pairs"] |= {(id1, id2)}
 
-    def find_relationship(self, paths):
-        # keeps all of the legal paths
-        out_paths = []
+#     def find_relationship(self, paths):
+#         # keeps all of the legal paths
+#         out_paths = []
 
-        # iterate through the paths
-        for path in paths:
+#         # iterate through the paths
+#         for path in paths:
 
-            # self looping path
-            if len(path) == 1:
-                continue
+#             # self looping path
+#             if len(path) == 1:
+#                 continue
 
-            # path_dir describes the path between the two nodes. 1 indicates moving up the ped, -1 indicates moving down the ped
-            path_dir = [1 if self.ped.get_edge_data(path[i], path[i+1]) == None else -1 for i in np.arange(len(path)-1)]
+#             # path_dir describes the path between the two nodes. 1 indicates moving up the ped, -1 indicates moving down the ped
+#             path_dir = [1 if self.ped.get_edge_data(path[i], path[i+1]) == None else -1 for i in np.arange(len(path)-1)]
 
-            # is a lineal relationship
-            if path_dir.count(-1) == 0 or path_dir.count(1) == 0:
+#             # is a lineal relationship
+#             if path_dir.count(-1) == 0 or path_dir.count(1) == 0:
 
-                # id1 is the older individual if the path starts with -1; in this case, flip everything so id2 is listed first
-                if path_dir[0] == -1:
-                    path_dir = [1 for _ in path_dir]
-                    path = path[::-1]
+#                 # id1 is the older individual if the path starts with -1; in this case, flip everything so id2 is listed first
+#                 if path_dir[0] == -1:
+#                     path_dir = [1 for _ in path_dir]
+#                     path = path[::-1]
 
-                # get the sex of the younger individual's parent
-                sex = self.ped.nodes[path[1]]["sex"]
+#                 # get the sex of the younger individual's parent
+#                 sex = self.ped.nodes[path[1]]["sex"]
 
-                out_paths.append((path, tuple(path_dir), sex))
-                continue
+#                 out_paths.append((path, tuple(path_dir), sex))
+#                 continue
 
-            # find index of the first descent in the pedigree and then check that there are no more ascents after
-            # once we go down in the pedigree, we can't go back up; if this bool is true, continue
-            if path_dir[path_dir.index(-1):].count(1) > 0:
-                continue
+#             # find index of the first descent in the pedigree and then check that there are no more ascents after
+#             # once we go down in the pedigree, we can't go back up; if this bool is true, continue
+#             if path_dir[path_dir.index(-1):].count(1) > 0:
+#                 continue
 
-            # we want the first node to be the genetically younger individual; we we ensure that this is true
-            # Rule: if id1 is genetically older they are closer to the tmrca
-            if len(path_dir[:path_dir.index(-1)]) < len(path_dir[path_dir.index(-1):]):
-                path_dir = list(np.array(path_dir)*-1)[::-1]
-                path = path[::-1]
+#             # we want the first node to be the genetically younger individual; we we ensure that this is true
+#             # Rule: if id1 is genetically older they are closer to the tmrca
+#             if len(path_dir[:path_dir.index(-1)]) < len(path_dir[path_dir.index(-1):]):
+#                 path_dir = list(np.array(path_dir)*-1)[::-1]
+#                 path = path[::-1]
 
-            # get the sex of the first individual's parent
-            sex = self.ped.nodes[path[1]]["sex"]
+#             # get the sex of the first individual's parent
+#             sex = self.ped.nodes[path[1]]["sex"]
 
-            out_paths.append((path, tuple(path_dir), sex))
+#             out_paths.append((path, tuple(path_dir), sex))
 
-        if len(out_paths) == 0:
-            return np.nan, np.nan
+#         if len(out_paths) == 0:
+#             return np.nan, np.nan
 
-        # get a df of all the paths
-        paths_df = pd.DataFrame(out_paths, columns=["path_ids", "path", "sex"])
+#         # get a df of all the paths
+#         paths_df = pd.DataFrame(out_paths, columns=["path_ids", "path", "sex"])
 
-        # the ibd1 from the given relationship
-        paths_df["ibd1"] = paths_df["path"].apply(lambda x: 0.5**(len(x)-1))
+#         # the ibd1 from the given relationship
+#         paths_df["ibd1"] = paths_df["path"].apply(lambda x: 0.5**(len(x)-1))
 
-        # id1 is the genetically younger ind, id2 is the older
-        paths_df["id1"] = paths_df["path_ids"].apply(lambda x: x[0])
-        paths_df["id2"] = paths_df["path_ids"].apply(lambda x: x[-1])
+#         # id1 is the genetically younger ind, id2 is the older
+#         paths_df["id1"] = paths_df["path_ids"].apply(lambda x: x[0])
+#         paths_df["id2"] = paths_df["path_ids"].apply(lambda x: x[-1])
 
-        # iterate through each path type
-        for path, path_df in paths_df.groupby("path"):
+#         # iterate through each path type
+#         for path, path_df in paths_df.groupby("path"):
 
-            # lineal relationship
-            if np.abs(path).sum() == sum(path):
+#             # lineal relationship
+#             if np.abs(path).sum() == sum(path):
 
-                # default rel; change for PO andGP
-                rel = (len(path)-1)*"G" + "P"
-                prefix = ""
+#                 # default rel; change for PO andGP
+#                 rel = (len(path)-1)*"G" + "P"
+#                 prefix = ""
 
-                # they are GP
-                if path == (1,):
-                    rel = "PO"
+#                 # they are GP
+#                 if path == (1,):
+#                     rel = "PO"
 
-                # they are GP/GC add the sex
-                elif path == (1, 1):
-                    sex = path_df.iloc[0]["sex"]
-                    prefix = "P" if sex == "1" else ("M" if sex == "2" else "")
+#                 # they are GP/GC add the sex
+#                 elif path == (1, 1):
+#                     sex = path_df.iloc[0]["sex"]
+#                     prefix = "P" if sex == "1" else ("M" if sex == "2" else "")
 
-                self.add_pair(*path_df.iloc[0][["id1", "id2"]], prefix + rel)                
+#                 self.add_pair(*path_df.iloc[0][["id1", "id2"]], prefix + rel)                
         
-            # they are siblings (either FS or HS)
-            elif path == (1, -1):
+#             # they are siblings (either FS or HS)
+#             elif path == (1, -1):
                 
-                # half siblings
-                if path_df.shape[0] == 1:
-                    sex = path_df.iloc[0]["sex"]
-                    prefix = "P" if sex == "1" else ("M" if sex == "2" else "")
-                    self.add_pair(*path_df.iloc[0][["id1", "id2"]], prefix + "HS")
+#                 # half siblings
+#                 if path_df.shape[0] == 1:
+#                     sex = path_df.iloc[0]["sex"]
+#                     prefix = "P" if sex == "1" else ("M" if sex == "2" else "")
+#                     self.add_pair(*path_df.iloc[0][["id1", "id2"]], prefix + "HS")
 
-                # full siblings
-                if path_df.shape[0] == 2:
-                    self.add_pair(*path_df.iloc[0][["id1", "id2"]], "FS")
+#                 # full siblings
+#                 if path_df.shape[0] == 2:
+#                     self.add_pair(*path_df.iloc[0][["id1", "id2"]], "FS")
 
-            # they are avuncular
-            elif path == (1, 1, -1):
+#             # they are avuncular
+#             elif path == (1, 1, -1):
 
-                # half-avuncular
-                if path_df.shape[0] == 1:
-                    self.add_pair(*path_df.iloc[0][["id1", "id2"]], "HAV")
+#                 # half-avuncular
+#                 if path_df.shape[0] == 1:
+#                     self.add_pair(*path_df.iloc[0][["id1", "id2"]], "HAV")
 
-                # full avuncular
-                else:
-                    self.add_pair(*path_df.iloc[0][["id1", "id2"]], "AV")
+#                 # full avuncular
+#                 else:
+#                     self.add_pair(*path_df.iloc[0][["id1", "id2"]], "AV")
 
-            # they are cousins
-            elif path == (1, 1, -1, -1):
+#             # they are cousins
+#             elif path == (1, 1, -1, -1):
 
-                # half-cousins
-                if path_df.shape[0] == 1:
-                    self.add_pair(*path_df.iloc[0][["id1", "id2"]], "HCO")
+#                 # half-cousins
+#                 if path_df.shape[0] == 1:
+#                     self.add_pair(*path_df.iloc[0][["id1", "id2"]], "HCO")
 
-                # double cousins
-                elif path_df.shape[0] == 4:
-                    self.add_pair(*path_df.iloc[0][["id1", "id2"]], "DCO")
+#                 # double cousins
+#                 elif path_df.shape[0] == 4:
+#                     self.add_pair(*path_df.iloc[0][["id1", "id2"]], "DCO")
 
-                # full cousins
-                elif path_df.shape[0] == 2 and len(set(path_df["sex"])) == 1:
-                    self.add_pair(*path_df.iloc[0][["id1", "id2"]], "CO")
+#                 # full cousins
+#                 elif path_df.shape[0] == 2 and len(set(path_df["sex"])) == 1:
+#                     self.add_pair(*path_df.iloc[0][["id1", "id2"]], "CO")
 
-                # double half-cousins
-                elif path_df.shape[0] == 2 and len(set(path_df["sex"])) == 2:
-                    self.add_pair(*path_df.iloc[0][["id1", "id2"]], "DHCO")
+#                 # double half-cousins
+#                 elif path_df.shape[0] == 2 and len(set(path_df["sex"])) == 2:
+#                     self.add_pair(*path_df.iloc[0][["id1", "id2"]], "DHCO")
 
-        # get the kinship through each parent
-        k1, k2 = [paths_df[paths_df.sex==sex]["ibd1"].sum() for sex in ["1", "2"]]
+#         # get the kinship through each parent
+#         k1, k2 = [paths_df[paths_df.sex==sex]["ibd1"].sum() for sex in ["1", "2"]]
 
-        # return the expected IBD1, IBD2
-        return (k1*(1-k2)) + (k2*(1-k1)), k1*k2
+#         # return the expected IBD1, IBD2
+#         return (k1*(1-k2)) + (k2*(1-k1)), k1*k2
 
-    def find_relationships(self):
+#     def find_relationships(self):
 
-        # temp graph that is undirected
-        tmp = self.ped.to_undirected()
+#         # temp graph that is undirected
+#         tmp = self.ped.to_undirected()
 
-        # keep track of expected IBD sharing
-        eIBD = nx.Graph()
+#         # keep track of expected IBD sharing
+#         eIBD = nx.Graph()
 
-        ### iterate through all pairs
-        for id1, id2 in it.combinations(self.ped.nodes, r=2):
+#         ### iterate through all pairs
+#         for id1, id2 in it.combinations(self.ped.nodes, r=2):
 
-            # find and add the relationshipsl; return the expected IBD sharing
-            eIBD1, eIBD2 = self.find_relationship(nx.all_simple_paths(tmp, min(id1, id2), max(id1, id2), cutoff=6))
+#             # find and add the relationshipsl; return the expected IBD sharing
+#             eIBD1, eIBD2 = self.find_relationship(nx.all_simple_paths(tmp, min(id1, id2), max(id1, id2), cutoff=6))
 
-            # add to the expected IBD graph
-            if eIBD1 > 0:
-                eIBD.add_edge(id1, id2, ibd1=eIBD1, ibd2=eIBD2)
+#             # add to the expected IBD graph
+#             if eIBD1 > 0:
+#                 eIBD.add_edge(id1, id2, ibd1=eIBD1, ibd2=eIBD2)
 
-        self.eIBD = eIBD
+#         self.eIBD = eIBD
 
-    # returns all pairs that are under the umbrella (inclusive) of a relationship (root)
-    def get_relationships(self, root):
-        # keep track of pairs
-        out_pairs = self.rels.hier.nodes[root]["pairs"]
+#     # returns all pairs that are under the umbrella (inclusive) of a relationship (root)
+#     def get_relationships(self, root):
+#         # keep track of pairs
+#         out_pairs = self.rels.hier.nodes[root]["pairs"]
         
-        # iterate through the descendants
-        for child in nx.descendants(self.rels.hier, root):
-            out_pairs |= self.rels.hier.nodes[child]["pairs"]
+#         # iterate through the descendants
+#         for child in nx.descendants(self.rels.hier, root):
+#             out_pairs |= self.rels.hier.nodes[child]["pairs"]
 
-        return out_pairs
+#         return out_pairs
 
+
+class Pedigree:
+    def __init__(self, **kwargs):
+
+        po_list = kwargs.get("po_list", [])
+        samples_g = kwargs.get("samples", None)
+
+        # a list of po-pairs has been supplied
+        if len(po_list) > 0:
+            po = nx.DiGraph()
+            po.add_edges_from(po_list)
+
+        # samples graph has been supplied
+        elif len(samples_g.g.nodes) > 0:
+            tmp = nx.DiGraph()
+            tmp.add_edges_from(it.chain(*[[[data["mother"], node], [data["father"], node]] for node, data in samples.g.nodes(data=True)]))
+            po = tmp.subgraph(set(tmp.nodes) - {np.nan})
+
+        self.po = po
+
+        # must supply the yaml file
+        self.R = RelationshipCodes(kwargs["yaml_file"])
+
+        # create the pedigree hierarchy
+        self.hier = PedigreeHierarchy(kwargs["yaml_file"])
+
+    # for a given focal individual, finds all relationships
+    def focal_relationships(self, focal):
+        # recursive function that, given a focal individual returns all paths to relatives
+        def get_paths(cur_relative, path_ids, path_dirs, paths):
+            # init the next set of relatives
+            next_set = []
+
+            # past the first iteration, so we can get down nodes, but only down nodes that are not in the path
+            if len(path_dirs) > 1:
+                next_set += [(nxt_relative,-1) for nxt_relative in self.po.successors(cur_relative) if nxt_relative not in path_ids]
+
+            # we're still moving up, so we can get the up nodes
+            if path_dirs[-1] > 0:
+                next_set += [(nxt_relative, 1) for nxt_relative in self.po.predecessors(cur_relative)]
+
+            # we can't keep going; base case
+            if len(next_set) == 0:
+                paths.append((path_ids, path_dirs))
+                return paths
+
+            # iterate through the new set of relatives
+            for nxt_relative, direction in next_set:
+                paths = get_paths(nxt_relative, path_ids + [nxt_relative], path_dirs + [direction], paths)
+            return paths
+
+        # given the output of get_paths, creates all sub-paths
+        def merge_paths(focal, paths):
+            # init the dict to store each relative pair and the paths along each parental lineage
+            rel_pairs = {id2: {1: set(), 2: set()} for id2 in it.chain(*[path_ids for path_ids,_ in paths])}
+
+            # iterate through the paths
+            for path_ids, path_dirs in paths:
+                # zip the path ids and the path directions
+                path = [(id2, pdir) for id2, pdir in zip(path_ids, path_dirs)]
+
+                # iterate through each person in the path
+                for index in range(1, len(path)):
+                    # get the id of the relative
+                    id2 = path[index][0]
+                    # get the subpath from the focal to the current id2
+                    subpath = path[1:index+1]
+                    # determine which parent they are related through
+                    parent_sex = samples.g.nodes[subpath[0][0]]["sex"]
+                    # add to the rel pairs dictionary
+                    rel_pairs[id2][int(parent_sex)] |= {tuple(path[1:index+1])}
+            
+            return rel_pairs
+
+        # get all paths
+        path_list = get_paths(focal, [focal], [1], [])
+
+        # keep track of unknown relationships
+        unknown_rels = []
+
+        # iterate through each relative of the focal individual
+        for id2, path_dict in merge_paths(focal, path_list).items():
+            if focal == id2:
+                continue
+
+            # get the relationship 
+            rname, e_ibd1, e_ibd2, mat, same_gen = self.R.determine_relationship(path_dict)
+
+            # don't want to add if rname is nan or they are same generation and id2 > id1
+            if rname == "nan" or (same_gen and focal > id2):
+                continue
+
+            if rname == "unknown":
+                unknown_rels.append(np.array2string(mat[:,1:]))
+
+            self.hier.add_pair((focal, id2), rname, {"ibd1": e_ibd1, "ibd2": e_ibd2})
+        
+        return unknown_rels
+
+    # finds all relationships for nodes in the graph
+    def find_all_relationships(self):
+
+        unknown_rels = it.chain(*[self.focal_relationships(focal) for focal in self.po.nodes])
+
+        print("The following unknown relationships were found:")
+
+        for unkr, n in Counter(unknown_rels).items():
+            print(f"{n} of the following were found:")
+            print(unkr + "\n")
 
 
         
