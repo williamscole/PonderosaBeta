@@ -218,7 +218,11 @@ samples = pkl.load(i)
 
 yaml_file = "pedigree_codes.yaml"
 Ped = Pedigree(samples=samples, yaml_file=yaml_file)
+Ped.find_all_relationships()
+
+# merge the samples ibd data in
+Ped.hier.update_attr_from([[(id1, id2), "ibd_data", samples.g.get_edge_data(id1, id2)] for id1,id2 in Ped.hier.get_pairs("relatives")])
+
 import pdb; pdb.set_trace()
-# Ped.find_all_relationships()
 
 

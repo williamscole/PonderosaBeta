@@ -651,7 +651,7 @@ class Relationship:
 
         # support for inter-generational relationships
         longest_path = max([len(path) for path in p1 + p2])
-        matrix = np.array([path + [0 for _ in range(longest_path - len(path))] for path in p1 + p2])
+        matrix = np.array(sorted([path + [0 for _ in range(longest_path - len(path))] for path in p1 + p2]))
 
         # set attrs
         self.sex_specific = data["sex"]
@@ -659,15 +659,15 @@ class Relationship:
 
     # returns boolean if it is the given relationship
     def is_relationship(self, mat):
-        # convert the path dict to a matrix
         mat = mat if self.sex_specific else mat[:,1:]
+        mat = np.array(sorted(mat.tolist()))
 
         # not the same shape == can't be the relationship
         if self.mat.shape != mat.shape:
             return False
 
         # returns True if the relationship matches
-        return (self.mat - mat).sum() == 0
+        return np.abs((self.mat - mat)).sum() == 0
         
 
 
@@ -709,7 +709,7 @@ class RelationshipCodes:
         mat, ibd1, ibd2 = self.convert_to_matrix(path_dict)
 
         # the pair are the same generation
-        same_gen = mat[:,1:].sum() == 0
+        same_gen = mat.sum() == 0
 
         # iterate through the relationships
         for name, robj in self.codes:
@@ -827,9 +827,11 @@ class Pedigree:
                 continue
 
             if rname == "unknown":
+                if mat.shape == (2,5) and mat[1, 4]==0:
+                    import pdb; pdb.set_trace()
                 unknown_rels.append(np.array2string(mat[:,1:]))
 
-            self.hier.add_pair((focal, id2), rname, {"ibd1": e_ibd1, "ibd2": e_ibd2})
+            self.hier.add_pair((focal, id2), rname, {"ibd1": e_ibd1, "ibd2": e_ibd2, "mat": mat})
         
         return unknown_rels
 

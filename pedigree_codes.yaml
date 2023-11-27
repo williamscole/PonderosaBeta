@@ -127,6 +127,15 @@ DHAV:
   sex: false
   degree: 3rd+
 
+COHCO:
+  1:
+    - [1, 1, -1, -1]
+    - [1, 1, -1, -1]
+  2:
+    - [1, 1, -1, -1]
+  sex: false
+  degree: 3rd+
+
 
 
 
