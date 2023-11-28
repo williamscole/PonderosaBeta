@@ -104,8 +104,8 @@ def visualize_classifiers(classif_name, classif, ax):
             ax.annotate(labs[i], (XX[np.where(Zi>0.5)].mean(), YY[np.where(Zi>0.5)].mean()))
             ax.contour(XX, YY, Zi, [0.5], linewidths=4, colors="white")
             
-        ax.set_xlabel("h1")
-        ax.set_ylabel("h2")
+        ax.set_xlabel(r"$h_1$")
+        ax.set_ylabel(r"$h_2$")
         ax.set_title("hap classifier")
 
     def plot_nsegs_classifier(classif, ax):
