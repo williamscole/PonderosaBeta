@@ -4,13 +4,13 @@ FS:
   2:
     - [1, -1]
   sex: false
-  degree: 1st
+  degree: relatives
 
 PO:
   1:
     - [1,]
   sex: false
-  degree: 1st
+  degree: relatives
 
 PHS:
   1:
@@ -40,15 +40,21 @@ AV:
     - [1, 1, -1]
     - [1, 1, -1]
   sex: false
-  parent: GPAV
   degree: 2nd
+  parent: GPAV
+
+HAV:
+  1:
+    - [1, 1, -1]
+  sex: false
+  degree: 3rd
 
 GP:
   1:
     - [1, 1]
   sex: false
-  parent: GPAV
   degree: 2nd
+  parent: GPAV
 
 PGP:
   1:
@@ -63,6 +69,12 @@ MGP:
   sex: true
   degree: 2nd
   parent: GP
+
+GGP:
+  1:
+    - [1, 1, 1]
+  sex: false
+  degree: 3rd
 
 DCO:
   1:
@@ -91,6 +103,19 @@ HSHCO:
   sex: false
   degree: 2nd+
 
+CO:
+  1:
+    - [1, 1, -1, -1]
+    - [1, 1, -1, -1]
+  sex: false
+  degree: 3rd
+
+HCO:
+  1:
+    - [1, 1, -1, -1]
+  sex: false
+  degree: 4th
+
 DHCO:
   1:
     - [1, 1, -1, -1]
@@ -104,6 +129,15 @@ DHAV:
     - [1, 1, -1]
   2:
     - [1, 1, -1]
+  sex: false
+  degree: 3rd+
+
+COHCO:
+  1:
+    - [1, 1, -1, -1]
+    - [1, 1, -1, -1]
+  2:
+    - [1, 1, -1, -1]
   sex: false
   degree: 3rd+
 

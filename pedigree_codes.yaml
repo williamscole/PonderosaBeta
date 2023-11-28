@@ -4,13 +4,13 @@ FS:
   2:
     - [1, -1]
   sex: false
-  degree: 1st
+  degree: relatives
 
 PO:
   1:
     - [1,]
   sex: false
-  degree: 1st
+  degree: relatives
 
 PHS:
   1:
