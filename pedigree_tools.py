@@ -76,7 +76,7 @@ def visualize_classifiers(classif_name, classif, ax):
         Z = classif.predict_proba(np.c_[XX.ravel(), YY.ravel()])
         for i in range(len(labs)):
             Zi = Z[:,i].reshape(XX.shape)
-
+            ax.annotate(labs[i], (XX[np.where(Zi>0.5)].mean(), YY[np.where(Zi>0.5)].mean()))
             ax.contour(XX, YY, Zi, [0.5], linewidths=4, colors="white")
 
         ax.set_xlabel("IBD1")
@@ -101,6 +101,7 @@ def visualize_classifiers(classif_name, classif, ax):
         Z = classif.predict_proba(np.c_[XX.ravel(), YY.ravel()])
         for i in range(len(labs)):
             Zi = Z[:,i].reshape(XX.shape)
+            ax.annotate(labs[i], (XX[np.where(Zi>0.5)].mean(), YY[np.where(Zi>0.5)].mean()))
             ax.contour(XX, YY, Zi, [0.5], linewidths=4, colors="white")
             
         ax.set_xlabel("h1")
@@ -115,7 +116,7 @@ def visualize_classifiers(classif_name, classif, ax):
 
         for index, lab in enumerate(labs):
 
-            Y = classif.predict_proba([[0.5, i] for i in X])[:, index]
+            Y = classif.predict_proba([[0.25, i] for i in X])[:, index]
 
             ax.plot(X, Y, label=lab)
 
@@ -709,7 +710,7 @@ class RelationshipCodes:
         mat, ibd1, ibd2 = self.convert_to_matrix(path_dict)
 
         # the pair are the same generation
-        same_gen = mat.sum() == 0
+        same_gen = mat[:,1:].sum() == 0
 
         # iterate through the relationships
         for name, robj in self.codes:
@@ -755,10 +756,10 @@ class Pedigree:
         self.po = po
 
         # must supply the yaml file
-        self.R = RelationshipCodes(kwargs["yaml_file"])
+        self.R = RelationshipCodes(kwargs["pedigree_file"])
 
         # create the pedigree hierarchy
-        self.hier = PedigreeHierarchy(kwargs["yaml_file"])
+        self.hier = PedigreeHierarchy(kwargs["tree_file"])
 
     # for a given focal individual, finds all relationships
     def focal_relationships(self, focal):
@@ -827,12 +828,11 @@ class Pedigree:
                 continue
 
             if rname == "unknown":
-                if mat.shape == (2,5) and mat[1, 4]==0:
-                    import pdb; pdb.set_trace()
                 unknown_rels.append(np.array2string(mat[:,1:]))
+                continue
 
             self.hier.add_pair((focal, id2), rname, {"ibd1": e_ibd1, "ibd2": e_ibd2, "mat": mat})
-        
+
         return unknown_rels
 
     # finds all relationships for nodes in the graph
@@ -845,6 +845,8 @@ class Pedigree:
         for unkr, n in Counter(unknown_rels).items():
             print(f"{n} of the following were found:")
             print(unkr + "\n")
+
+
 
 
 # class PedigreeHierarchy:
