@@ -53,6 +53,9 @@ class SampleData:
         ### load the fam file
         fam = pd.read_csv(fam_file, delim_whitespace=True, dtype=str, header=None)
 
+        ### the default information for adding a person
+        self.default = {"sex": 0, "mother": -1, "father": -1, "children": [], "age": np.nan, "popl": "pop1"}
+
         ### init the graph and set defaults
         g = nx.Graph()
         g.add_nodes_from(fam.apply(lambda x: (x[1], {"sex": x[4],

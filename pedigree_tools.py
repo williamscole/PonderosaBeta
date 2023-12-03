@@ -548,31 +548,32 @@ class PedigreeHierarchy:
 
         # plot the nodes and their probabilities
         for lab, (x, y, p, p_con, method) in pos.items():
-            ax.text(x, y, lab + f"\n{round(p, 3)}\n{method}\n{round(p_con, 3)}", color="black", va='center', ha='center', 
+            ax.text(x, y, lab + f"\np={round(p, 3)}\n{method}\n{round(p_con, 3)}", color="black", va='center', ha='center', 
             bbox=dict(edgecolor=cmap(float(p)), facecolor='white', boxstyle='round'))
 
         # minor graph aspects
         ax.set_aspect(1)
         ax.axis('off')
+        return ax
 
     # plots the probability tree for the degree
     def plot_degree(self, show_zero_p):
 
         g = self.hier.subgraph(nx.descendants_at_distance(self.hier, "relatives", 1) | {"relatives"})
 
-        self.plot_hierarchy(g, -1 if show_zero_p else 0.0)
+        return self.plot_hierarchy(g, -1 if show_zero_p else 0.0)
 
     # plots the probability tree for second degree relatives
     def plot_second(self, show_zero_p):
 
         g = self.hier.subgraph(nx.descendants(self.hier, "2nd") | {"2nd"})
 
-        self.plot_hierarchy(g, -1 if show_zero_p else 0.0)
+        return self.plot_hierarchy(g, -1 if show_zero_p else 0.0)
 
     # plots the entire hierarchy
     def plot_all(self, show_zero_p):
 
-        self.plot_hierarchy(self.hier, -1 if show_zero_p else 0.0)
+        return self.plot_hierarchy(self.hier, -1 if show_zero_p else 0.0)
 
     ### This set of functions is for holding pairs known relatives
     ##################################################################################################
