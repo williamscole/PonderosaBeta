@@ -4,6 +4,9 @@ import yaml
 import itertools as it
 from collections import Counter
 import pickle as pkl
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 
 from Ponderosa import SampleData
 from pedigree_tools import PedigreeHierarchy, Pedigree
@@ -204,25 +207,69 @@ from pedigree_tools import PedigreeHierarchy, Pedigree
 #             print(f"{n} of the following were found:")
 #             print(unkr + "\n")
         
-# samples = SampleData(fam_file="for_dev/Himba_missing.fam",
+# samples = SampleData(fam_file="for_dev/Himba_allPO.fam",
 #                      king_file="for_dev/King_Relatedness_no2278.seg",
 #                      ibd_file="for_dev/Himba_shapeit.chr1_segments.txt",
 #                      map_file="for_dev/newHimba_shapeit.chr1.map",
 #                      code_yaml="tree_codes.yaml")
 
+# i = open("for_dev/sample.pkl", "wb")
+# samples = pkl.dump(samples, i)
+# i.close()
 
 i = open("for_dev/sample.pkl", "rb")
 samples = pkl.load(i)
 
-
-
-yaml_file = "pedigree_codes.yaml"
-Ped = Pedigree(samples=samples, yaml_file=yaml_file)
+Ped = Pedigree(samples=samples, pedigree_file="pedigree_codes.yaml", tree_file="tree_codes.yaml")
 Ped.find_all_relationships()
 
-# merge the samples ibd data in
-Ped.hier.update_attr_from([[(id1, id2), "ibd_data", samples.g.get_edge_data(id1, id2)] for id1,id2 in Ped.hier.get_pairs("relatives")])
+pairs = Ped.hier
 
-import pdb; pdb.set_trace()
+### Train the degree classifier
+degree_train = pairs.get_pair_df("relatives").dropna(subset="k_ibd1")
+degree_lda = LinearDiscriminantAnalysis().fit(degree_train[["k_ibd1", "k_ibd2"]].values.tolist(),
+                                              degree_train[["degree"]].values.tolist())
+
+### Train the hap classifier
+hap_train = pairs.get_pair_df_from(["HS", "GPAV"]).dropna(subset="h")
+X_train = hap_train.apply(lambda x: [x.h_error[x.pair[0]], x.h_error[x.pair[1]]], axis=1).values.tolist()
+y_train = ["Phase error" for _ in X_train]
+X_train += hap_train.apply(lambda x: [x.h[x.pair[0]], x.h[x.pair[1]]], axis=1).values.tolist()
+y_train += hap_train["requested"].values.tolist()
+
+hap_lda = LinearDiscriminantAnalysis().fit(X_train, y_train)
+
+### Train the degree classifier
+n_train = pairs.get_pair_df_from(["MGP", "MHS", "PHS", "PGP", "AV"]).dropna(subset=["n"])
+n_train["k_k"] = n_train.apply(lambda x: x.k_ibd2 + x.k_ibd1/2, axis=1)
+n_lda = LinearDiscriminantAnalysis().fit(n_train[["k_k", "n"]].values.tolist(), n_train["requested"].values.tolist())
+
+relatives = Ped.hier.get_pair_df("relatives").dropna(subset="k_ibd1")
+relatives["e_k"] = relatives.apply(lambda x: x.ibd2 + x.ibd1/2, axis=1)
+relatives["k"] = relatives.apply(lambda x: x.k_ibd2 + x.k_ibd1/2, axis=1)
+sns.scatterplot(data=relatives, x="e_k", y="k")
+plt.plot([0, 0.5], [0, 0.5])
+plt.savefig("delete.png", dpi=500)
+
+
+
+
+
+print(Ped.hier.get_pair_df_from(["GPAV", "HS"]).dropna(subset="h"))
+
+print(Ped.hier.get_pair_df("2nd").dropna(subset="n"))
+
+
+# import pdb; pdb.set_trace()
+
+
+# yaml_file = "pedigree_codes.yaml"
+# Ped = Pedigree(samples=samples, yaml_file=yaml_file)
+# Ped.find_all_relationships()
+
+# # merge the samples ibd data in
+# Ped.hier.update_attr_from([[(id1, id2), "ibd_data", samples.g.get_edge_data(id1, id2)] for id1,id2 in Ped.hier.get_pairs("relatives")])
+
+# import pdb; pdb.set_trace()
 
 

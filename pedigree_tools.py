@@ -741,7 +741,7 @@ class Pedigree:
         samples = kwargs.get("samples", None)
 
         # store the samples g
-        self.g = samples.g
+        self.samples = samples
 
         # a list of po-pairs has been supplied
         if len(po_list) > 0:
@@ -749,9 +749,11 @@ class Pedigree:
             po.add_edges_from(po_list)
 
         # samples graph has been supplied
-        elif len(self.g.nodes) > 0:
+        elif len(self.samples.g.nodes) > 0:
             tmp = nx.DiGraph()
-            tmp.add_edges_from(it.chain(*[[[data["mother"], node], [data["father"], node]] for node, data in self.g.nodes(data=True)]))
+            tmp.add_edges_from(it.chain(*[[[data["mother"], node], [data["father"], node]] for node, data in self.samples.g.nodes(data=True)]))
+            # add sex and optionally, other attrs
+            nx.set_node_attributes(tmp, {node: {attr: data[attr] for attr in ["sex", "age"]} for node, data in self.samples.g.nodes(data=True)})
             po = tmp.subgraph(set(tmp.nodes) - {-1})
 
         self.po = po
@@ -761,6 +763,9 @@ class Pedigree:
 
         # create the pedigree hierarchy
         self.hier = PedigreeHierarchy(kwargs["tree_file"])
+
+        # keep track of the dummy id number
+        self.n = 1
 
     # for a given focal individual, finds all relationships
     def focal_relationships(self, focal):
@@ -804,7 +809,7 @@ class Pedigree:
                     # get the subpath from the focal to the current id2
                     subpath = path[1:index+1]
                     # determine which parent they are related through
-                    parent_sex = self.g.nodes[subpath[0][0]]["sex"]
+                    parent_sex = self.po.nodes[subpath[0][0]]["sex"]
                     # add to the rel pairs dictionary
                     rel_pairs[id2][int(parent_sex)] |= {tuple(path[1:index+1])}
             
@@ -832,12 +837,82 @@ class Pedigree:
                 unknown_rels.append(np.array2string(mat[:,1:]))
                 continue
 
-            self.hier.add_pair((focal, id2), rname, {"ibd1": e_ibd1, "ibd2": e_ibd2, "mat": mat})
+            edge_data = self.samples.g.get_edge_data(focal, id2, {})
+            attrs = {attr: edge_data.get(attr, np.nan) for attr in ["k_ibd1", "k_ibd2", "h", "h_error", "n"]}
+            
+            # add attrs from the pedigree
+            attrs["ibd1"] = e_ibd1; attrs["ibd2"] = e_ibd2; attrs["mat"] = mat
+
+            self.hier.add_pair((focal, id2), rname, attrs)
 
         return unknown_rels
+    
+    '''
+    Finds sets of full-siblings and makes sure that they have the same parents
+    '''
+    def resolve_sibships(self):
+        '''
+        Takes as input a list of indviduals who are full-siblings
+        If they all have both parents listed --> do nothing
+        If they all have only one parent --> add another parent
+        If they all have no parents --> add two parents
+        Returns a list of new edges to add
+        TODO: add support for sex
+        '''
+        def add_parent(fam):
+            # for each individual in the "family", make a set of the number of parents that can be added (0, 1, or 2)
+            new_parents = {2-self.po.in_degree(node) for node in fam}
+            if len(new_parents) > 1:
+                return []
+            new_nodes = []
+            n_parents_to_add = new_parents.pop()
+            if n_parents_to_add == 1:
+                sex = self.po.nodes[next(self.po.predecessors("HMB156"))]["sex"]
+                new_nodes += [[f"Missing{self.n}", node, {"1": "2", "2": "1"}[sex]] for node in fam]
+                self.n += 1
+            elif n_parents_to_add == 2:
+                new_nodes += [[f"Missing{self.n}", node, "1"] for node in fam]
+                new_nodes += [[f"Missing{self.n+1}", node, "2"] for node in fam]
+                self.n += 2
+            return new_nodes
+        
+        # all pairs of individuals who share the same parent 
+        sib_pairs = set(it.chain(*[[tuple(sorted([id1, id2])) for id1, id2 in it.combinations(self.po.successors(node), r=2)] for node in self.po.nodes]))
+
+        # get the data frame of the sib pairs
+        sib_df = self.samples.to_dataframe(sib_pairs, include_edges=True)
+
+        # train gaussian mixture model
+        gmm = GaussianMixture(n_components=2,
+                              means_init=[[0.5, 0], [0.5, 0.25]],
+                              covariance_type="spherical").fit(sib_df[["k_ibd1", "k_ibd2"]].values.tolist())
+        print(f"Trained sibling GMM. Half-sibling means are ibd1={round(gmm.means_[0][0], 2)}, ibd2={round(gmm.means_[0][1], 2)}")
+        print(f"Full-sibling means are ibd1={round(gmm.means_[1][0], 2)}, ibd2={round(gmm.means_[1][1], 2)}\n")
+        
+        # predict whether FS or HS
+        sib_df["predicted"] = gmm.predict(sib_df[["k_ibd1", "k_ibd2"]].values.tolist())
+
+        # the label 1 corresponds to full-siblings
+        fs_g = nx.Graph()
+        fs_g.add_edges_from(sib_df[sib_df.predicted==1][["id1", "id2"]].values)
+
+        # get a list of the new parent ids to add
+        new_parents = list(it.chain(*[add_parent(fam) for fam in nx.connected_components(fs_g)]))
+
+        # add new parents
+        tmp = self.po.copy()
+        tmp.add_edges_from([i[:2] for i in new_parents])
+        nx.set_node_attributes(tmp, {parent: {"sex": sex, "age": np.nan} for parent, _, sex in new_parents})
+        
+        print(f"Added {self.n} missing parents that are shared between full-siblings.")
+
+        # reassign
+        self.po = tmp
 
     # finds all relationships for nodes in the graph
     def find_all_relationships(self):
+
+        self.resolve_sibships()
 
         unknown_rels = it.chain(*[self.focal_relationships(focal) for focal in self.po.nodes])
 
