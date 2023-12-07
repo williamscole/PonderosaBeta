@@ -1,5 +1,20 @@
 # Ponderosa-beta
 
+### Setting up the virtual environment and installing phasedibd
+
+*I have tested this with Python 3.10.9. Earlier versions of Python may work, but phasedibd needs at least Python 3.8 to install.*
+
+1. Create the virtual environment: `python -m venv ponderosa_venv`
+2. Activate the virtual environment: `source ponderosa_venv/bin/activate`
+3. Install required packages: `python -m pip install -r requirements.txt` (`requirements.txt` is found in this directory)
+4. Clone `phasedibd`: `git clone https://github.com/23andMe/phasedibd`
+5. `cd phasedibd`
+6. `make`**
+7. `python setup.py install`
+8. `python tests/unit_tests.py`
+
+**On the HPC that I use, I need to replace the third line of the phasedibd Makefile with `python -m pip install cython` (currently it reads `pip install cython --user`, which may cause permissions issues).
+
 ### Plotting IBD segments
 
 ```
