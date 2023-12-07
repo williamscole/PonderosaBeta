@@ -13,7 +13,7 @@
 7. `python setup.py install`
 8. `python tests/unit_tests.py`
 
-**On the HPC that I use, I need to replace the third line of the phasedibd Makefile with `python -m pip install cython` (currently it reads `pip install cython --user`, which may cause permissions issues).
+**On the HPC that I use, I need to replace the third line of the `phasedibd` Makefile with `python -m pip install cython` (currently it reads `pip install cython --user`, which may cause permissions issues).
 
 ### Creating a map file
 
