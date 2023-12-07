@@ -7,6 +7,7 @@ import pickle as pkl
 import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+import pandas as pd
 
 from Ponderosa import SampleData
 from pedigree_tools import PedigreeHierarchy, Pedigree
@@ -217,47 +218,102 @@ from pedigree_tools import PedigreeHierarchy, Pedigree
 # samples = pkl.dump(samples, i)
 # i.close()
 
-i = open("for_dev/sample.pkl", "rb")
-samples = pkl.load(i)
+class TrainPonderosa:
+    def __init__(self, pairs):
 
-Ped = Pedigree(samples=samples, pedigree_file="pedigree_codes.yaml", tree_file="tree_codes.yaml")
-Ped.find_all_relationships()
+        ### Train the degree classifier
+        degree_train = pairs.get_pair_df("relatives").dropna(subset="k_ibd1")
+        self.degree_lda = LinearDiscriminantAnalysis().fit(degree_train[["k_ibd1", "k_ibd2"]].values.tolist(),
+                                                    degree_train["degree"].values)
 
-pairs = Ped.hier
+        ### Train the hap classifier
+        hap_train = pairs.get_pair_df_from(["HS", "GPAV"]).dropna(subset="h")
 
-### Train the degree classifier
-degree_train = pairs.get_pair_df("relatives").dropna(subset="k_ibd1")
-degree_lda = LinearDiscriminantAnalysis().fit(degree_train[["k_ibd1", "k_ibd2"]].values.tolist(),
-                                              degree_train[["degree"]].values.tolist())
+        # get the phase error classifier
+        X_train = hap_train.apply(lambda x: [x.h_error[x.pair[0]], x.h_error[x.pair[1]]], axis=1).values.tolist()
+        y_train = ["Phase error" for _ in X_train]
 
-### Train the hap classifier
-hap_train = pairs.get_pair_df_from(["HS", "GPAV"]).dropna(subset="h")
-X_train = hap_train.apply(lambda x: [x.h_error[x.pair[0]], x.h_error[x.pair[1]]], axis=1).values.tolist()
-y_train = ["Phase error" for _ in X_train]
-X_train += hap_train.apply(lambda x: [x.h[x.pair[0]], x.h[x.pair[1]]], axis=1).values.tolist()
-y_train += hap_train["requested"].values.tolist()
+        # now add the actual haplotype scores
+        X_train += hap_train.apply(lambda x: [x.h[x.pair[0]], x.h[x.pair[1]]], axis=1).values.tolist()
+        y_train += hap_train["requested"].values.tolist()
 
-hap_lda = LinearDiscriminantAnalysis().fit(X_train, y_train)
+        self.hap_lda = LinearDiscriminantAnalysis().fit(X_train, y_train)
 
-### Train the degree classifier
-n_train = pairs.get_pair_df_from(["MGP", "MHS", "PHS", "PGP", "AV"]).dropna(subset=["n"])
-n_train["k_k"] = n_train.apply(lambda x: x.k_ibd2 + x.k_ibd1/2, axis=1)
-n_lda = LinearDiscriminantAnalysis().fit(n_train[["k_k", "n"]].values.tolist(), n_train["requested"].values.tolist())
+        ### Train the degree classifier
+        n_train = pairs.get_pair_df_from(["MGP", "MHS", "PHS", "PGP", "AV"]).dropna(subset=["n"])
 
-relatives = Ped.hier.get_pair_df("relatives").dropna(subset="k_ibd1")
-relatives["e_k"] = relatives.apply(lambda x: x.ibd2 + x.ibd1/2, axis=1)
-relatives["k"] = relatives.apply(lambda x: x.k_ibd2 + x.k_ibd1/2, axis=1)
-sns.scatterplot(data=relatives, x="e_k", y="k")
-plt.plot([0, 0.5], [0, 0.5])
-plt.savefig("delete.png", dpi=500)
+        # also train on the kinship coefficient
+        n_train["ibd_cov"] = n_train.apply(lambda x: x.k_ibd2 + x.k_ibd1, axis=1)
 
+        self.n_lda = LinearDiscriminantAnalysis().fit(n_train[["ibd_cov", "n"]].values.tolist(), n_train["requested"].values)
+
+    # def update_probs()
+
+    
 
 
 
+def PONDEROSA():
+        # samples = SampleData(fam_file="for_dev/Himba_allPO.fam",
+#                      king_file="for_dev/King_Relatedness_no2278.seg",
+#                      ibd_file="for_dev/Himba_shapeit.chr1_segments.txt",
+#                      map_file="for_dev/newHimba_shapeit.chr1.map",
+#                      code_yaml="tree_codes.yaml")
 
-print(Ped.hier.get_pair_df_from(["GPAV", "HS"]).dropna(subset="h"))
+    i = open("for_dev/sample.pkl", "rb")
+    samples = pkl.load(i)
 
-print(Ped.hier.get_pair_df("2nd").dropna(subset="n"))
+    pedigree = Pedigree(samples=samples, pedigree_file="pedigree_codes.yaml", tree_file="tree_codes.yaml")
+    pedigree.find_all_relationships()
+
+    pairs = pedigree.hier
+
+    classifiers = TrainPonderosa(pairs)
+
+    # get all close relatives to exclude
+    found_close = list(pairs.get_nodes_from(["2nd", "PO", "FS"]))
+
+    unknown_df = samples.to_dataframe(found_close, include_edges=False).dropna(subset="n")
+    unknown_df["ibd_cov"] = unknown_df.apply(lambda x: x.ibd1 + x.ibd2, axis=1)
+
+    probs = classifiers.degree_lda.predict_proba(unknown_df[["k_ibd1", "k_ibd2"]].values)
+
+    for (_, row), prob in zip(unknown_df.iterrows(), probs):
+        row["probs"].add_probs(list(zip(classifiers.degree_lda.classes_, prob, ["ibd" for _ in prob])))
+
+    probs = classifiers.n_lda.predict_proba(unknown_df[["ibd_cov", "n"]].values)
+    for (_, row), prob in zip(unknown_df.iterrows(), probs):
+        row["probs"].add_probs(list(zip(classifiers.n_lda.classes_, prob, ["nsegs" for _ in prob])))
+
+        for node in ["GP", "GPAV", "HS"]:
+            child_probs = [row["probs"].hier.nodes[i]["p_con"] for i in row["probs"].hier.successors(node)]
+            row["probs"].add_probs(node, p_con=sum(child_probs), method="nsegs")
+    
+    probs = classifiers.hap_lda.predict_proba(unknown_df.apply(lambda x: sorted([h for _,h in x.h.items()], reverse=True), axis=1).values.tolist())
+    pe_index = list(classifiers.hap_lda.classes_).index("Phase error")
+    for (_, row), prob in zip(unknown_df.iterrows(), probs):
+        if prob[pe_index] > 0.2:
+            continue
+        row["probs"].add_probs(list(zip(classifiers.hap_lda.classes_[:2], prob[:2], ["hap" for _ in prob][:2])))
+        row["probs"].compute_probs()
+
+    unknown_df["predicted"] = unknown_df["probs"].apply(lambda x: x.most_probable(0)[0])
+    import pdb; pdb.set_trace()
+
+
+    # unknown_samples = samples.g.copy()
+
+    # unknown_samples.remove_edges_from(found_close)
+
+    # unknown_df = nx.to_pandas_edgelist(unknown_samples, source="id1", target="id2")
+
+
+PONDEROSA()
+
+
+# print(Ped.hier.get_pair_df_from(["GPAV", "HS"]).dropna(subset="h"))
+
+# print(Ped.hier.get_pair_df("2nd").dropna(subset="n"))
 
 
 # import pdb; pdb.set_trace()

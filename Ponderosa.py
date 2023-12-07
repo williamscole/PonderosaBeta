@@ -241,11 +241,11 @@ class SampleData:
         return nx.to_pandas_edgelist(tmp, source="id1", target="id2")
 
     # update the hier probabilities
-    def update_probs(self, pair_list, probs_list, prob_labs, method):
+    def update_probs(self, probs_list, prob_labs, method, prob_objs):
         # iterate through the probabilities
-        for (id1, id2), probs in zip(pair_list, probs_list):
-            self.g.edges[id1, id2]["probs"].set_attrs({i: p for i,p in zip(prob_labs, probs)}, "p")
-            self.g.edges[id1, id2]["probs"].set_attrs({i: method for i in prob_labs}, "method")
+        for probs, prob_obj in zip(probs_list, prob_objs):
+            prob_obj.set_attrs({i: p for i,p in zip(prob_labs, probs)}, "p_con")
+            prob_obj.set_attrs({i: method for i in prob_labs}, "method")
 
     def node_attr(self, node, attr, nan=np.nan):
         try:
