@@ -15,6 +15,27 @@
 
 **On the HPC that I use, I need to replace the third line of the phasedibd Makefile with `python -m pip install cython` (currently it reads `pip install cython --user`, which may cause permissions issues).
 
+### Creating a map file
+
+Running `python pedigree_tools.py -interpolate [options]` will create a Plink-formatted MAP file with the genetic position filled in. It takes as input a genetic map and interpolates the cM coordinate of a physical position.
+
+The following arguments are accepted:
+- `-input_map`: the MAP file in which the genetic position needs to be filled in (no header; assumes the columns are: chromosome, SNP ID, cM position filled with 0, physical position)
+- `-map_file`: the file containing genetic map coordinates (no header; requires the following columns: chromosome, cM position, physical position)
+- `-columns`: default is to assume that `map_file` is a Plink MAP-formatted file. Alternatively, you can use this optional argument to specify the 0-indexed index of the chromosome, cM position, and physical position columns (in that order). E.g., `-columns 2 3 4` indicates that the chromosome, cM, and Mb columns are the 3rd, 4th, and 5th columns, respectively.
+- `-sites`: if only a subset of loci are to be output. This file has no headers and expects two columns: chromosome and physical position. This is **optional** and omitting it will include all sites in `input_map`.
+
+The output is the file: `[input_map]_interpolated.map`
+
+### Running phasedibd
+
+Running `python pedigree_tools.py -phasedibd [options]` will run `phasedibd`.
+
+The following arguments are accepted:
+- `-input_vcf`: uncompressed VCF for a single chromosome.
+- `-input_map`: Plink MAP file. `phasedibd` requires that it contains *exactly* the sites in `input_vcf`; see above `-interpolate` to create this file.
+- `-outfile`: the name of the file to write the IBD segments to.
+
 ### Plotting IBD segments
 
 ```
