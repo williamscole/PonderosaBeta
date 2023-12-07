@@ -4,7 +4,8 @@ import itertools as it
 import numpy as np
 from datetime import datetime
 import time
-import yaml
+import argparse
+# import yaml
 from math import floor, ceil
 # import phasedibd as ibd
 import os
@@ -1157,44 +1158,91 @@ class TrainPonderosa:
         f.close()
         
 
-# takes as input a map_file (either all chrom together or separate) and a vcf file
-def interpolate_map(map_file, vcf_file):
-    # # take all the sites from the vcf
-    # vcf_pos = []
-    # with open(vcf_file) as vcf:
-    #     for line in vcf:
-    #         if "#" in line:
-    #             continue
-    #         chrom, pos, rsid = line.split()[:3]
-    #         vcf_pos.append([int(chrom), int(pos), rsid])
+'''
+This function is for filling in the genetic position of a MAP file. It takes as input
+(1) the map file that needs its genetic position column filled (input_map=)
+(2) a genetic map file (map_file=)
+(3) if (2) is not plink MAP format, the 0-indexed index of the chromosome number, physical position, genetic coordinate (in that order); otherwise optional (columns=)
+(4) a file containing two columns: chromosome number and physical position; the outputted MAP file will ONLY contain these (sites=)
+'''
+def interpolate_map(input_map, map_file, **kwargs):
+    ### Prep the map file
+    cols = kwargs.get("columns", [0, 2, 3])
 
-    # # create dataframe from the vcf sites
-    # out_map = pd.DataFrame(vcf_pos, columns=["CHROM", "MB", "rsID"])
+    map_file_df = pd.read_csv(map_file, delim_whitespace=True, header=None)
+    map_file_df = map_file_df.rename({index: col for index, col in zip(cols, ["CHROM", "MB", "CM"])}, axis=1)
 
-    out_map = pd.read_csv(vcf_file, delim_whitespace=True, header=None, names=["CHROM", "MB", "rsID"])
+    ### Open the in map file
+    in_map_df = pd.read_csv(input_map, delim_whitespace=True, header=None, names=["CHROM", "rsID", "CM", "MB"])
 
-    # we have multiple map files
-    if "chr1" in map_file:
-        # create dict where chrom maps to its map_df
-        chrom_map = {chrom: pd.read_csv(map_file.replace("chr1", f"chr{chrom}"), delim_whitespace=True, names=["CHROM", "rsID", "cM", "MB"]) for chrom in range(1,23)}
-    # only one map file with all chrom
+    ### Open the optional file containing the sites to keep
+    sites_file = kwargs.get("sites", "")
+
+    # the file exists, merge with the inputted map_df
+    if os.path.exists(sites_file):
+        sites_df = pd.read_csv(sites_file, delim_whitespace=True, header=None, names=["CHROM", "MB"])
+        sites_df["keep"] = True
+
+        in_map_df = in_map_df.merge(sites_df, on=["CHROM", "MB"], how="outer")
+        in_map_df["keep"] = in_map_df["keep"].fillna(False)
+
+    # no keep sites file, so keep all the  sites
     else:
-        # load the map file
-        map_df = pd.read_csv(map_file, delim_whitespace=True, names=["CHROM", "rsID", "cM", "MB"])
-        # subset into dict mapping to its df
-        chrom_map = {chrom: chrom_df for chrom, chrom_df in map_df.groupby("chrom")}
+        in_map_df["keep"] = True
+
+    out_maps = []
+    for chrom, chrom_df in in_map_df.groupby("CHROM"):
+        # get the df of the genetic map df
+        map_df = map_file_df[map_file_df.CHROM==chrom]
+
+        # make sure it's sorted correctly
+        chrom_df = chrom_df.sort_values("MB")
+
+        # linear interpolation
+        chrom_df["CM"] = np.interp(chrom_df["MB"], map_df["MB"], map_df["CM"])
+
+        out_maps.append(chrom_df)
+
+    # concat all the chromosomes together
+    out_map_df = pd.concat(out_maps).fillna("NA")
+
+    # write it out
+    out_map_df[out_map_df.keep==True][["CHROM", "rsID", "CM", "MB"]].to_csv(input_map.replace(".map", "_interpolated.map"), header=False, index=False, sep=" ")
+
+
+
+def run_phasedibd(input_vcf, input_map, **kwargs):
+
+    import phasedibd as ibd
+
+    haps = ibd.VcfHaplotypeAlignment(input_vcf, input_map)
+    tpbwt = ibd.TPBWTAnalysis()
+    ibd_results = tpbwt.compute_ibd(haps, 
+                                    use_phase_correction=kwargs.get("use_phase_correction", False),
+                                    L_f=kwargs.get("L_f", 3.0))
     
-    # iterate through the chromosomes of the vcf file
-    for chrom, chrom_df in out_map.groupby("CHROM"):
-        # load the map reference to interpolate chrom
-        map_df = chrom_map[chrom]
-        # linear interpolation of sites
-        chrom_df["cM"] = np.interp(chrom_df["MB"], map_df["MB"], map_df["cM"])
-        # convert df to str and reorder
-        chrom_df = chrom_df[["CHROM", "rsID", "cM", "MB"]].astype(str)
-        # write out the map files individually
-        out = open(f"sim_chr{chrom}.map", "w")
-        _ = out.write("\n".join(chrom_df.apply(lambda x: "\t".join(x), axis=1).values.tolist()) + "\n")
+    # get a list of the samples in the vcf
+    with open(input_vcf) as vcf:
+        for line in vcf:
+            if "#CHROM" in line:
+                samples = line.split()[9:]
+                break
+
+    # rename the column with the corresponding VCF ID
+    ibd_results["id1"] = ibd_results["id1"].apply(lambda x: samples[x])
+    ibd_results["id2"] = ibd_results["id2"].apply(lambda x: samples[x])
+
+    # if output file is blank, return the dataframe, otherwise write it
+    if kwargs.get("outfile", "") != "":
+        ibd_results.to_csv(kwargs["outfile"], index=False, sep="\t")
+    
+    else:
+        return ibd_results
+
+
+
+
+
         
 class RemoveRelateds:
 
@@ -1851,120 +1899,6 @@ def quick_kinship(pair_df):
     return ibd1, ibd2
     
 
-class Simulations:
-
-    def __init__(self, args):
-
-        # set the various vars
-        vcf = args.vcf
-        pop = args.pop
-
-
-        # get the samples
-        samples = pd.DataFrame(str(subprocess.run(f"bcftools query -l {vcf}", shell=True, stdout=subprocess.PIPE).stdout, encoding='utf-8').split(), columns=["id1"])
-
-        # get the populations
-        if args.pop_file != None and os.path.exists(args.pop_file):
-            pops = pd.read_csv(args.pop_file, columns=["id1", "population"])
-            samples = samples.merge(pops, on="id1", how="left")
-        
-        # no population file has been found; default is that all samples belong to the same population
-        else:
-            print("No population file found or supplied. Assuming one population.")
-            samples["population"] = "pop1"
-
-        # subset the samples from the population
-        pop_samples = samples[samples.population==pop]
-
-        # check that there are enough samples
-        if pop_samples.shape[0] < 10:
-            print("Not enough samples in the population!")
-
-        # check to see if the simulation dir exists
-        if os.path.exists(f"{pop}_sims/"):
-            print("Simulation file already exists!")
-
-        # create simulation directory
-        subprocess.run(f"mkdir {pop}_sims/", shell=True)
-
-        # write out the samples to a text file and then subset the vcf
-        pop_samples["id1"].to_csv(f"{pop}_sims/pop_ids.txt", index=False, header=False)
-        subprocess.run(f"bcftools view -S {pop}_sims/pop_ids.txt {vcf} > {pop}_sims/input.vcf", shell=True)
-
-        # save attributes to the class
-        self.samples = pop_samples
-        self.n_samples = pop_samples.shape[0]
-
-        # open king
-        king_df = pd.read_csv(args.king, delim_whitespace=True)
-        # subset king
-        id1_col = king_df["ID1"].isin(pop_samples["id1"].values)
-        id2_col = king_df["ID2"].isin(pop_samples["id1"].values)
-        pop_king = king_df[(id1_col) & (id2_col)]
-
-        # what percentage are above the kinship threshold?
-        n = pop_samples.shape[0]
-        n_pairs = n*(1-n)/2
-        n_over = pop_king[pop_king.PropIBD>args.k].shape[0]
-        print(f"Probability of a random mating pair more related than the threshold: {abs(round(n_over / n_pairs, 2))}")
-        
-        # create ibd network
-        self.ibd_g = nx.Graph()
-        self.ibd_g.add_weighted_edges_from(pop_king[["ID1","ID2","PropIBD"]].values, "PropIBD")
-
-        # iteration number
-        self.iter = 1
-
-        # create the runs
-        self.run = f"{args.pedsim} -i input.vcf -m {args.simmap} --intf {args.intf} --keep_phase --founder_ids --fam "
-
-        # target number of pairs
-        self.target = 50
-
-        # store var things
-        self.k = args.k
-        self.pop = pop
-        self.path = f"{pop}_sims/"
-        self.rel_founders = {}
-        self.rel_n = {}
-
-    def simulation_iter(self, args):
-
-        # list of def files
-        def_files = str(subprocess.run(f"ls {args.def_dir}*def", shell=True, stdout=subprocess.PIPE).stdout, encoding='utf-8').split()
-
-        # keep list of all commands
-        commands = []
-
-        # iterate through the def files
-        for def_file in def_files:
-            # get the relative type
-            rel = def_file.split("/")[-1].split(".")[0]
-
-            # already have enough relatives, skip
-            if self.rel_n.get(rel, 0) > 50:
-                continue
-
-            # get the number founders needed per iteration
-            fline = open(def_file).readline().rstrip()
-            n_founders = int(fline.split()[1])
-            self.rel_founders[rel] = n_founders
-
-            # compute the max number of iters possible given the size of the vcf
-            ped_iters = floor(self.n_samples / n_founders)
-
-            # add the --out argument
-            run = self.run + f"-o {rel}_{self.iter} "
-            # add the def argument
-            run += f"-d <(sed 's;n_iter;{ped_iters};g' {def_file})\n"
-
-            # add to list of commands
-            commands.append(run)
-
-        # write out a file with a list of the ped-sim commands to run
-        out = open(f"{self.pop}_sims/iter{self.iter}.txt", "w")
-        out.write("".join(commands))
-
     def run_phasedibd(self, args):
 
         import phasedibd as ibd
@@ -2061,149 +1995,12 @@ class Simulations:
 
 
 
-        # print(ibd_segments)
-
-
-
-
-
-                # subprocess.run(f"bcftools ")
-
-                # print(tmp_file)
-
-            # print(map_df)
-
-
-
-
-
-
 
 
             
 
     
         
-
-
-
-
-class PedigreeNetwork:
-    
-    def __init__(self, fam):
-
-        # can pass the fam pandas df or the file path to open the pandas df
-        if type(fam) == str:
-            fam = pd.read_csv(fam, delim_whitespace=True, header=None, dtype = str)
-
-        # name the columns
-        fam.columns = ["FID", "IID", "Father", "Mother", "Sex", "Pheno"]
-
-        # convert sex to int
-        fam["Sex"] = fam["Sex"].apply(int)
-
-        # pedigree structure is a directed graph
-        self.pedigree = nx.DiGraph()
-        # add all IID as nodes, with the sex as an attribute of the node
-        self.pedigree.add_nodes_from([[row["IID"], dict(sex=row["Sex"])] for _, row in fam.iterrows()])
-        # write edges from father --> child and mother -->; edge attribute is down
-        self.pedigree.add_edges_from([list(i) + [dict(dir="down")] for i in fam[fam.Father != "0"][["Father", "IID"]].values])
-        self.pedigree.add_edges_from([list(i) + [dict(dir="down")] for i in fam[fam.Mother != "0"][["Mother", "IID"]].values])
-        # write edges from child --> parent; edge attribute is up
-        self.pedigree.add_edges_from([list(i) + [dict(dir="up")] for i in fam[fam.Father != "0"][["IID", "Father"]].values])
-        self.pedigree.add_edges_from([list(i) + [dict(dir="up")] for i in fam[fam.Mother != "0"][["IID", "Mother"]].values])
-
-        # these codes tell us how to get between different relationship types
-        # e.g., grandchild --> grandparent has you traverse up twice
-        self.rel_code = {('up', 'up'): 'GP',
-                        ('up', 'up', 'up'): 'GGP',
-                        ('up', 'up', 'up', 'up'): 'GGGP',
-                        ('up', 'up', 'up', 'up', 'up'): 'GGGGP',
-                        ('up', 'up', 'down'): 'AV',
-                        ('up', 'up', 'down', 'down'): 'CO',
-                        ('up', 'down'): 'sib',
-                        ('up',): 'PO'}
-
-        # relative df
-        self.relatives = pd.DataFrame(columns = ["id1", "id2", "E_ibd1", "E_ibd2", "maternal", "paternal"])
-
-    def get_pedigree(self):
-        return self.pedigree
-
-    def find_relationship(self, id1, id2):
-
-        # a path is not legit if it goes up after it goes down; prevents relationship with a spouse/inlaw
-        def legit_path(dir_path):
-            down = False
-            for d in dir_path:
-                down = down or d == "down"
-                if down and d == "up":
-                    return False
-            return True
-        
-        # we want to order id1, id2 as younger generation, older generation
-        def reverse_path(id1, id2, path, path_dir):
-            # True if id1 is in an older generation
-            reversed = path_dir.count("down") > path_dir.count("up")
-            # if id1 is in an older generation
-            if reversed:
-                # reverse the direction
-                path_dir = [{"down": "up", "up": "down"}[i] for i in path_dir[::-1]]
-                # path currently goes id1 --> id2, so reverse the list
-                path = path[::-1]
-                # switch the ids
-                id1, id2 = id2, id1
-            return id1, id2, path, path_dir, reversed
-
-        # get all paths between the two nodes, cutoff of 5
-        paths = list(nx.all_simple_paths(self.pedigree, source = id1, target = id2, cutoff = 5))
-
-        # iterate through the paths
-        for index, path in enumerate(paths):
-            # gets the directions of the edges in the path
-            path_dir = [self.pedigree.get_edge_data(path[index], path[index+1])["dir"] for index in range(len(path)-1)]
-            # reverse the path if id1 is in an older generation; if so, switches id1 and id2
-            id1_temp, id2_temp, path, path_dir, reversed = reverse_path(id1, id2, path, path_dir)
-            # update the path and get the sex of id1_temp's parent
-            paths[index] = [id1_temp, id2_temp, self.pedigree.nodes[path[1]]["sex"], path_dir]
-
-        # keep track of how much IBD shared with each parent
-        k = {1: 0, 2: 0}
-        # list to store paths to be returned
-        out_paths = []
-        # iterate through each path
-        for id1, id2, sex, path_dir in paths:
-            # check to see if the path is legal through the pedigree
-            if legit_path(path_dir):
-                # get the prop IBD1 for the number of meioses between the two
-                ibd1 = 0.5**(len(path_dir)-1)
-                # add the amount of ibd to the parent
-                k[sex] += ibd1
-                # add the path and get the relationship
-                out_paths.append([id1, id2, sex, self.rel_code.get(tuple(path_dir), "Other"), ibd1])
-        # expected proportion of genome IBD1
-        ibd1 = k[1]*(1-k[2]) + (1-k[1])*k[2]
-        # expected proportion of the genome IBD2
-        ibd2 = k[1] * k[2]
-        # expected prop IBD
-        propIBD = 0.5*ibd1 + ibd2
-
-        return [ibd1, ibd2, propIBD, out_paths]
-
-    # finds all the relationships
-    def get_paths(self):
-        # first get all the paths in the graph that are, at most, 5 edges long
-        paths = dict(nx.all_pairs_shortest_path(self.pedigree, 5))
-        rels = []
-        for id1 in paths:
-            for id2 in paths[id1]:
-                if id1 >= id2:
-                    continue
-                ibd1, ibd2, propIBD, out_paths = self.find_relationship(id1, id2)
-                for id1_temp, id2_temp, sex, rel, _ in out_paths:
-                    rels.append([(id1, id2), id1_temp, id2_temp,])
-                
-                rels.append(relationships)
         
 
 class Karyogram:
@@ -2387,47 +2184,75 @@ def remove_missing(vcffile):
 
 # p = PedSims("")
 # p.subset_vcf("plink_keep.txt", "../ponderosa/plink_data/Himba_shapeit.chr1.vcf")
+# if __name__ == "__main__":
+#     if sys.argv[-1] == "plink_unrelateds":
+#         r = RemoveRelateds()
+#         r.plink_unrelateds(sys.argv[-3], float(sys.argv[-2]))
+
+#     if sys.argv[-1] == "concat_rel":
+#         p = PedSims("")
+#         with concurrent.futures.ProcessPoolExecutor() as executor:
+#             results = [executor.submit(p.run_ibd_iteration, sys.argv[-4], sys.argv[-3], sys.argv[-2], chrom) for chrom in range(1, 23)]
+#             ibd_results = pd.concat([f.result() for f in concurrent.futures.as_completed(results)]).reset_index(drop=True)
+#         try:
+#             df = pd.read_feather("simulated_segments.f")
+#             df = pd.concat([df, ibd_results]).reset_index(drop=True)
+#         except:
+#             df = ibd_results
+
+#         df.to_feather("simulated_segments.f")
+
+#     if sys.argv[-1] == "missing":
+#         remove_missing(sys.argv[-2])
+
+#     if sys.argv[-1] == "pop_ibd":
+#         p = PedSims("")
+#         # map_file, rel, iter, pop, chrom
+#         map_file, rel, iter, pop, chrom = [sys.argv[i] for i in range(-6, -1)]
+
+#         # run ibd
+#         ibd_results = p.run_pop_ibd_iteration(map_file, rel, iter, pop, chrom)
+        
+#         ibd_results.reset_index(drop=True).to_csv(f"{pop}/{pop}_chr{chrom}_{rel}{iter}.txt", sep="\t", index=False)
+
+#     if sys.argv[-1] == "rename_pop_ibd":
+#         segment_file, pop, rel, sim_iter = [sys.argv[i] for i in range(-5, -1)]
+
+#         p = PedSims("")
+#         p.rename_ibd_segments(segment_file, pop, rel, sim_iter)
+
+#     if sys.argv[-1] == "interpolate":
+#         interpolate_map(sys.argv[-3], sys.argv[-2])
+#     if sys.argv[-1] == "subset_vcf":
+#         p = PedSims("")
+#         p.subset_vcf(sys.argv[-3], sys.argv[-2])
+        
+def parse_args():
+    parser = argparse.ArgumentParser()
+
+    # args for interpolation
+    parser.add_argument("-interpolate", action="store_true")
+    parser.add_argument("-genetic_map", type=str)
+    parser.add_argument("-input_map", type=str)
+    parser.add_argument("-columns", nargs='+', default=[0, 2, 3], type=int)
+    parser.add_argument("-sites", type=str, default="")
+
+    # args for running phasedibd
+    parser.add_argument("-phasedibd", action="store_true")
+    parser.add_argument("-input_vcf", type=str)
+    parser.add_argument("-output", type=str)
+
+    args = parser.parse_args()
+    return args
+
+
 if __name__ == "__main__":
-    if sys.argv[-1] == "plink_unrelateds":
-        r = RemoveRelateds()
-        r.plink_unrelateds(sys.argv[-3], float(sys.argv[-2]))
 
-    if sys.argv[-1] == "concat_rel":
-        p = PedSims("")
-        with concurrent.futures.ProcessPoolExecutor() as executor:
-            results = [executor.submit(p.run_ibd_iteration, sys.argv[-4], sys.argv[-3], sys.argv[-2], chrom) for chrom in range(1, 23)]
-            ibd_results = pd.concat([f.result() for f in concurrent.futures.as_completed(results)]).reset_index(drop=True)
-        try:
-            df = pd.read_feather("simulated_segments.f")
-            df = pd.concat([df, ibd_results]).reset_index(drop=True)
-        except:
-            df = ibd_results
+    args = parse_args()
 
-        df.to_feather("simulated_segments.f")
 
-    if sys.argv[-1] == "missing":
-        remove_missing(sys.argv[-2])
+    if args.interpolate:
+        interpolate_map(in_map=args.input_map, map_file=args.genetic_map, columns=args.columns, sites=args.sites)
 
-    if sys.argv[-1] == "pop_ibd":
-        p = PedSims("")
-        # map_file, rel, iter, pop, chrom
-        map_file, rel, iter, pop, chrom = [sys.argv[i] for i in range(-6, -1)]
-
-        # run ibd
-        ibd_results = p.run_pop_ibd_iteration(map_file, rel, iter, pop, chrom)
-        
-        ibd_results.reset_index(drop=True).to_csv(f"{pop}/{pop}_chr{chrom}_{rel}{iter}.txt", sep="\t", index=False)
-
-    if sys.argv[-1] == "rename_pop_ibd":
-        segment_file, pop, rel, sim_iter = [sys.argv[i] for i in range(-5, -1)]
-
-        p = PedSims("")
-        p.rename_ibd_segments(segment_file, pop, rel, sim_iter)
-
-    if sys.argv[-1] == "interpolate":
-        interpolate_map(sys.argv[-3], sys.argv[-2])
-    if sys.argv[-1] == "subset_vcf":
-        p = PedSims("")
-        p.subset_vcf(sys.argv[-3], sys.argv[-2])
-        
-
+    if args.phasedibd:
+        run_phasedibd(input_vcf=args.input_vcf, input_map=args.input_map)
