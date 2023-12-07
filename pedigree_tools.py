@@ -1233,8 +1233,8 @@ def run_phasedibd(input_vcf, input_map, **kwargs):
     ibd_results["id2"] = ibd_results["id2"].apply(lambda x: samples[x])
 
     # if output file is blank, return the dataframe, otherwise write it
-    if kwargs.get("outfile", "") != "":
-        ibd_results.to_csv(kwargs["outfile"], index=False, sep="\t")
+    if kwargs.get("output", "") != "":
+        ibd_results.to_csv(kwargs["output"], index=False, sep="\t")
     
     else:
         return ibd_results
@@ -2255,4 +2255,4 @@ if __name__ == "__main__":
         interpolate_map(in_map=args.input_map, map_file=args.genetic_map, columns=args.columns, sites=args.sites)
 
     if args.phasedibd:
-        run_phasedibd(input_vcf=args.input_vcf, input_map=args.input_map)
+        run_phasedibd(input_vcf=args.input_vcf, input_map=args.input_map, output=args.output)
