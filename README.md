@@ -15,6 +15,12 @@
 
 **On the HPC that I use, I need to replace the third line of the `phasedibd` Makefile with `python -m pip install cython` (currently it reads `pip install cython --user`, which may cause permissions issues).
 
+### Setting up a conda environment
+
+1. `conda env create -f environment.yaml` will create a conda environment called `ponderosa` using Python 3.10.9 and will install all necessary dependencies.
+2. Activate the virtual environment: `conda activate ponderosa`
+3. To set up `phasedibd`, proceed using steps 4-8 above.
+
 ### Creating a map file
 
 Running `python pedigree_tools.py -interpolate [options]` will create a Plink-formatted MAP file with the genetic position filled in. It takes as input a genetic map and interpolates the cM coordinate of a physical position.
