@@ -5,7 +5,7 @@ import numpy as np
 from datetime import datetime
 import time
 import argparse
-# import yaml
+import yaml
 from math import floor, ceil
 # import phasedibd as ibd
 import os
@@ -30,6 +30,7 @@ def split_regions(region_dict, new_region):
         start1, end1 = region1
         start2, end2 = region2
         return min(end1,end2) - max(start1,start2)
+    
     # out region will be returned; is a dict of regions mapping to members of region    
     out_region = dict()
     # overlapped keeps track of all the regions that overlap with the new region
@@ -459,16 +460,16 @@ class PedigreeHierarchy:
     ### This set of functions is for holding/managing/plotting the hierarchy for a pair of individuals
     ##################################################################################################
 
-    def add_probs(self, node, **kwargs):
+    def add_probs(self, node, method, **kwargs):
         # a list of probs has been provided, not a single node
         if type(node) == list:
             add_list = node[:]
         # information for a single node has been provided (along with other pos args); convert to a list    
         else:
-            add_list = [[node, kwargs["p_con"], kwargs["method"]]]
+            add_list = [[node, kwargs["p_con"]]]
 
         # add the new information
-        for node, p, method in add_list:
+        for node, p in add_list:
             self.hier.nodes[node]["p_con"] = p
             self.hier.nodes[node]["method"] = method
         
@@ -575,6 +576,20 @@ class PedigreeHierarchy:
     def plot_all(self, show_zero_p):
 
         return self.plot_hierarchy(self.hier, -1 if show_zero_p else 0.0)
+    
+    def save_plot(self, which_plot, outfile, show_zero_p=True):
+
+        if which_plot == "degree":
+            self.plot_degree(show_zero_p)
+            plt.savefig(outfile, dpi=300)
+
+        elif which_plot == "second":
+            self.plot_second(show_zero_p)
+            plt.savefig(outfile, dpi=300)
+
+        elif which_plot == "all":
+            self.plot_all(show_zero_p)
+            plt.savefig(outfile, dpi=300)
 
     ### This set of functions is for holding pairs known relatives
     ##################################################################################################

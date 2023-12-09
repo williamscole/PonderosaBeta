@@ -222,12 +222,12 @@ class TrainPonderosa:
     def __init__(self, pairs):
 
         ### Train the degree classifier
-        degree_train = pairs.get_pair_df("relatives").dropna(subset="k_ibd1")
+        degree_train = pairs.get_pair_df("relatives").dropna(subset=["k_ibd1"])
         self.degree_lda = LinearDiscriminantAnalysis().fit(degree_train[["k_ibd1", "k_ibd2"]].values.tolist(),
                                                     degree_train["degree"].values)
 
         ### Train the hap classifier
-        hap_train = pairs.get_pair_df_from(["HS", "GPAV"]).dropna(subset="h")
+        hap_train = pairs.get_pair_df_from(["HS", "GPAV"]).dropna(subset=["h"])
 
         # get the phase error classifier
         X_train = hap_train.apply(lambda x: [x.h_error[x.pair[0]], x.h_error[x.pair[1]]], axis=1).values.tolist()
@@ -246,8 +246,6 @@ class TrainPonderosa:
         n_train["ibd_cov"] = n_train.apply(lambda x: x.k_ibd2 + x.k_ibd1, axis=1)
 
         self.n_lda = LinearDiscriminantAnalysis().fit(n_train[["ibd_cov", "n"]].values.tolist(), n_train["requested"].values)
-
-    # def update_probs()
 
     
 
@@ -273,31 +271,49 @@ def PONDEROSA():
     # get all close relatives to exclude
     found_close = list(pairs.get_nodes_from(["2nd", "PO", "FS"]))
 
-    unknown_df = samples.to_dataframe(found_close, include_edges=False).dropna(subset="n")
+    # make a dataframe of all pairs that are not close relatives
+    unknown_df = samples.to_dataframe(found_close, include_edges=False)
     unknown_df["ibd_cov"] = unknown_df.apply(lambda x: x.ibd1 + x.ibd2, axis=1)
 
+    # predict the degree of relatedness
+    unknown_df["predicted_degree"] = classifiers.degree_lda.predict(unknown_df[["k_ibd1", "k_ibd2"]].values)
+
+    # drop all pairs whose relationship we are not trying to guess
+    unknown_df = unknown_df.dropna(subset=["probs"])
+
+    # get the degree probabilities
     probs = classifiers.degree_lda.predict_proba(unknown_df[["k_ibd1", "k_ibd2"]].values)
-
+    # add the probabilities to the tree
     for (_, row), prob in zip(unknown_df.iterrows(), probs):
-        row["probs"].add_probs(list(zip(classifiers.degree_lda.classes_, prob, ["ibd" for _ in prob])))
+        row["probs"].add_probs(list(zip(classifiers.degree_lda.classes_, prob)), "ibd")
 
+    # get the n_ibd segs classifier probabilities
     probs = classifiers.n_lda.predict_proba(unknown_df[["ibd_cov", "n"]].values)
+    # add the probabilities to the tree
     for (_, row), prob in zip(unknown_df.iterrows(), probs):
-        row["probs"].add_probs(list(zip(classifiers.n_lda.classes_, prob, ["nsegs" for _ in prob])))
+        row["probs"].add_probs(list(zip(classifiers.n_lda.classes_, prob)), "method")
 
+        # for each of these nodes, take the sum of the two children
         for node in ["GP", "GPAV", "HS"]:
+            # array of the children probabilities
             child_probs = [row["probs"].hier.nodes[i]["p_con"] for i in row["probs"].hier.successors(node)]
+            # add the probability
             row["probs"].add_probs(node, p_con=sum(child_probs), method="nsegs")
     
+    # get the probabilities from the hap score classifier
     probs = classifiers.hap_lda.predict_proba(unknown_df.apply(lambda x: sorted([h for _,h in x.h.items()], reverse=True), axis=1).values.tolist())
-    pe_index = list(classifiers.hap_lda.classes_).index("Phase error")
+    # get the index of the Phase error class
+    classes = list(classifiers.hap_lda.classes_)
+    pe_index = classes.index("Phase error"); del classes[pe_index]
     for (_, row), prob in zip(unknown_df.iterrows(), probs):
+        # the chance of high Phase error is high; do not update the HS or GPAV probabilities
         if prob[pe_index] > 0.2:
             continue
-        row["probs"].add_probs(list(zip(classifiers.hap_lda.classes_[:2], prob[:2], ["hap" for _ in prob][:2])))
+        row["probs"].add_probs(list(zip(classes, np.delete(prob, pe_index))), "hap")
         row["probs"].compute_probs()
-
-    unknown_df["predicted"] = unknown_df["probs"].apply(lambda x: x.most_probable(0)[0])
+        row["probs"].save_plot("second", "delete.png")
+        break
+    # unknown_df["predicted"] = unknown_df["probs"].apply(lambda x: x.most_probable(0)[0])
     import pdb; pdb.set_trace()
 
 
