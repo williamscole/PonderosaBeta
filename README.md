@@ -42,6 +42,26 @@ The following arguments are accepted:
 - `-input_map`: Plink MAP file. `phasedibd` requires that it contains *exactly* the sites in `input_vcf`; see above `-interpolate` to create this file.
 - `-outfile`: the name of the file to write the IBD segments to.
 
+### Running PONDEROSA
+
+*Required file arguments*
+- `--ibd`: phasedibd IBD output file. If all chromosomes are in the same file, simply provide the file name. Otherwise, provide the file name for chromosome 1 (assumes that "chr1" is in the file name).
+- `--fam`: PLINK-formatted FAM file.
+- `--king`: KING .seg file.
+
+*Optional file arguments*
+- `--ages`: Age file where the first column is the individual ID and the second column is the age.
+- `--map`: PLINK-formatted MAP file (*highly recommended*). Sites from all chromosomes can be in the same file; otherwise provide the file for chromosome 1.
+- `--populations`: For running Ponderosa on a subset of samples, this file contains individual IDs (column 1) and a population label (column 2); you may specify which population you'd like run with `--population`.
+- `--yaml`: You may provide all of these arguments in a YAML file instead of on the command-line interface.
+- `--pedigree_codes`: Instructs PONDEROSA which relationships to look for in the dataset.
+
+*Other arguments*
+- `--output`: Output file prefix. *Default: Ponderosa*
+- `--min_p`: Minimum probability required for the relationship output. E.g., if P(2nd)=0.98 and P(MHS)=0.93, setting `min_p=0.95` would report the pair as `2nd`, but `min_p=0.9` would report the pair as `MHS`. *Default 0.50*
+- `--population`: Used with `--populations`, specifies the population to run PONDEROSA on.
+- `--assess`: For assessing the performance of Ponderosa on the known pairs.
+
 ### Plotting IBD segments
 
 ```
