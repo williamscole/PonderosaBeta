@@ -442,7 +442,7 @@ class PedigreeHierarchy:
 
             # init graph and add the nodes
             g = nx.DiGraph()
-            g.add_nodes_from([(node, {"p": np.nan, "p_con": np.nan, "method": "None"}) for node in it.chain(*edges)])
+            g.add_nodes_from([(node, {"p": 0, "p_con": 0, "method": "None"}) for node in it.chain(*edges)])
             g.add_edges_from(edges)
 
             # get relationships that are roots and add a root to root all the subtrees
@@ -527,7 +527,6 @@ class PedigreeHierarchy:
             for node in children:
                 self.hier.nodes[node]["p_con"] /= p
                 self.hier.nodes[node]["p"] = self.hier.nodes[node]["p_con"]*self.hier.nodes[parent]["p"]
-
 
     # starting at the root, traverses the path of most probable relationships until it reaches a probability below min_p
     def most_probable(self, min_p):

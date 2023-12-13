@@ -1,0 +1,4 @@
+fam: for_dev/Himba_allPO.fam
+king: for_dev/King_Relatedness_no2278.seg
+ibd: for_dev/Himba_shapeit.chr1_segments.txt
+map: for_dev/newHimba_shapeit.chr1.map
