@@ -8,10 +8,13 @@ from collections import Counter
 from math import floor, ceil
 import itertools as it
 from sklearn.mixture import GaussianMixture
+from sklearn.model_selection import LeaveOneOut
+
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 import matplotlib.pyplot as plt
+from copy import deepcopy
 
-from pedigree_tools import ProcessSegments, PedigreeHierarchy, SiblingClassifier, TrainPonderosa, introduce_phase_error
+from pedigree_tools import ProcessSegments, Pedigree, PedigreeHierarchy, SiblingClassifier, TrainPonderosa, introduce_phase_error
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -26,6 +29,7 @@ def parse_args():
     parser.add_argument("-min_p", help="Minimum posterior probability to output the relationship.", default=0.8, type=float)
     parser.add_argument("-n_pairs", help="Max number of pairs to look at. Default: all", default=np.inf, type=float)
     parser.add_argument("-debug", action="store_true")
+    parser.add_argument("-yaml", help="YAML file containing all arguments. OPTIONAL.", default="")
     args = parser.parse_args()
     return args
 
@@ -115,7 +119,10 @@ class SampleData:
 
         ### load the king file
         king_file = kwargs.get("king_file", "")
+        code_yaml = kwargs.get("code_yaml", "relationship_codes.yaml")
         if os.path.exists(king_file):
+            master_hier = PedigreeHierarchy(code_yaml)
+
             king_df = pd.read_csv(king_file, delim_whitespace=True, dtype={"ID1": str, "ID2": str})
 
             # get set of MZ twins; remove the 2nd twin in the pair
@@ -126,7 +133,8 @@ class SampleData:
                                                 {"k_prop": x.PropIBD,
                                                 "k_ibd1": x.IBD1Seg,
                                                 "k_ibd2": x.IBD2Seg,
-                                                "k_degree": x.InfType}],
+                                                "k_degree": x.InfType,
+                                                "probs": deepcopy(master_hier)}],
                                                 axis=1).values)
 
         ### subset to only samples from the population and who are not part of the twin set
@@ -136,7 +144,6 @@ class SampleData:
 
         ### load ibd, process ibd segs
         ibd_file = kwargs.get("ibd_file", "")
-        code_yaml = kwargs.get("code_yaml", "relationship_codes.yaml")
         if os.path.exists(ibd_file):
             print("Processing IBD segments...")
             ibd_files = get_file_names(ibd_file)
@@ -165,9 +172,10 @@ class SampleData:
                 ibd_data_pe = pair_ibd_pe.ponderosa_data(genome_len, inter_phase=False)
 
                 # set up the pedigree hierarchy, which will store the probs and info on how the probs were computed
-                hier = PedigreeHierarchy(code_yaml)
-                hier.update_attr_from([[node, "ordering", sorted([id1, id2])] for node in hier.init_nodes])
-                hier.update_attr_from([[node, "ordering_method", "sorted"] for node in hier.init_nodes])
+                hier = deepcopy(master_hier)
+                # TODO implement this somewhere else
+                # hier.update_attr_from([[node, "ordering", sorted([id1, id2])] for node in hier.init_nodes])
+                # hier.update_attr_from([[node, "ordering_method", "sorted"] for node in hier.init_nodes])
 
                 cur_edge_data = self.g.get_edge_data(id1, id2)
 
@@ -211,10 +219,10 @@ class SampleData:
     # updates a bunch of edges at once
     # edge_list looks like [(A, B), (B, C), (D, E)]
     # attr_list looks like [1, 2, 3]
-    def update_edges(self, edge_list, attr_list, attr_name):
+    def update_edges(self, attr_list, attr_name):
 
         attr_dict = {(id1, id2): attr for (id1, id2), attr in attr_list}
-        nx.set_edge_attributes(g, attr_dict, attr_name)
+        nx.set_edge_attributes(self.g, attr_dict, attr_name)
 
     # same as above but returns a set of nodes
     # e.g., get_nodes(lambda x: x["age"] > 90) returns all nodes that are >90 yo
@@ -226,6 +234,15 @@ class SampleData:
         node_subset = self.get_nodes(f)
         # return the subset for which the conditional is true
         return self.g.subgraph(set(node_subset))
+    
+    # subsets or returns a subset of the g based on a iterable of edges; inplace=True means it will modify self.g
+    def edge_subset(self, edges, inplace):
+        if inplace:
+            self.g = self.g.edge_subgraph(edges).copy()
+
+        else:
+            return self.g.edge_subgraph(edges).copy()
+
     
     def to_dataframe(self, edges, include_edges):
         if len(edges) == 0:
@@ -253,143 +270,278 @@ class SampleData:
         except:
             return nan
 
+
+class Classifiers:
+    def __init__(self, pairs):
+
+        # store the training data for each classifier; purpose is to allow leave one out training
+        self.training = {}
+
+        ### Train the degree classifier
+        degree_train = pairs.get_pair_df("relatives").dropna(subset=["k_ibd1"])
+
+        self.training["degree"] = [np.array(degree_train[["k_ibd1", "k_ibd2"]].values.tolist()),
+                                   np.array(degree_train["degree"].values.tolist())]
         
-def infer_second(id1, id2, pair_data, samples,
-                mhs_gap, gp_gap):
+        ### Train the hap classifier
+        hap_train = pairs.get_pair_df_from(["HS", "GPAV"]).dropna(subset=["h"])
 
-    ### Re-compute probabilities based on phenotypic data (parents, age, etc)
-    hier_obj = pair_data["probs"]
-    hier = hier_obj.hier
+        # get the phase error classifier
+        X_train = hap_train.apply(lambda x: [x.h_error[x.pair[0]], x.h_error[x.pair[1]]], axis=1).values.tolist()
+        y_train = ["Phase error" for _ in X_train]
 
-    ### bool is True if we want to use the haplotype classifier
-    use_hap = hier.nodes["HS"]["p"] + hier.nodes["GP/AV"]["p"] >= 0.80
+        # now add the actual haplotype scores
+        X_train += hap_train.apply(lambda x: [x.h[x.pair[0]], x.h[x.pair[1]]], axis=1).values.tolist()
+        y_train += hap_train["requested"].values.tolist()
 
-    ### Use phenotype data to set certain relationships to 0
+        self.training["hap"] = [np.array(X_train), np.array(y_train)]
 
-    # get the age gap
-    age_gap = abs(samples.nodes[id1]["age"] - samples.nodes[id2]["age"])
+        ### Train the degree classifier
+        n_train = pairs.get_pair_df_from(["MGP", "MHS", "PHS", "PGP", "AV"]).dropna(subset=["n"])
 
-    # too far in age to be MHS
-    if age_gap > mhs_gap:
-        hier.nodes["MHS"]["p"] = 0
-        hier.nodes["MHS"]["method"] = "pheno"
-        hier.nodes["PHS"]["method"] = "pheno"
+        # also train on the kinship coefficient
+        n_train["ibd_cov"] = n_train.apply(lambda x: x.k_ibd2 + x.k_ibd1, axis=1)
 
-    # too close in age to be GP
-    if age_gap < gp_gap:
-        hier_obj.set_attrs({i: 0 for i in ["PGP", "MGP", "GP"]}, "p")
-        hier_obj.set_attrs({i: "pheno" for i in ["PGP", "MGP", "GP"]}, "method")
+        self.training["n"] = [np.array(n_train[["ibd_cov", "n"]].values.tolist()), np.array(n_train["requested"].values.tolist())]
 
-    # not a paternal relationship
-    if samples.nodes[id1]["father"] != None or samples.nodes[id2]["father"] != None:
-        # not PHS
-        hier.nodes["PHS"]["p"] = 0
-        hier.nodes["PHS"]["method"] = "pheno"
-        hier.nodes["MHS"]["method"] = "pheno"
+        self.loo = LeaveOneOut()
 
-    # not MHS bc mother exists
-    if samples.nodes[id1]["mother"] != None or samples.nodes[id2]["mother"] != None:
-        hier.nodes["MHS"]["p"] = 0
-        hier.nodes["MHS"]["method"] = "pheno"
-        hier.nodes["PHS"]["method"] = "pheno"
+    # if n samples in X_train, will train the classifier n times, leaving a different sample out each time
+    def leaveOneOut(self, X_train, y_train, func, labels):
+            return_probs = []; return_labels = []
+            lda = LinearDiscriminantAnalysis()
 
-    # re-compute probabilities
-    second_nodes = ["AV", "MGP", "PGP", "PHS", "MHS"]
-    prob_sum = sum([hier.nodes[i]["p"] for i in second_nodes])
-    hier_obj.set_attrs({i: prob_sum and hier.nodes[i]["p"] / prob_sum or 0 for i in second_nodes}, "p")
+            for train, test in self.loo.split(X_train):
 
-    ### Done with pheno data
+                lda.fit(X_train[train], y_train[train])
 
-    ### Tier 2 probabilities
+                # predict
+                return_probs.append(func(lda, X_train[test])[0])
+                return_labels.append(lda.classes_)
 
-    # they are NOT hs; have to be GP/AV
-    if hier.nodes["PHS"]["p"] + hier.nodes["MHS"]["p"] == 0:
-        hier_obj.set_attrs({"HS": 0, "GP/AV": 1}, "p")
-        hier_obj.set_attrs({"HS": "pheno"}, "method")
+            # just predicting the label; don't need the probabilities
+            if labels:
+                return return_probs, iter(return_labels)
 
-    # use haplotype data
-    if use_hap:
-        prob_sum = hier.nodes["HS"]["p"] + hier.nodes["GP/AV"]["p"]
-        hier_obj.set_attrs({"HS": hier.nodes["HS"]["p"] / prob_sum if prob_sum > 0 else 0.50,
-                            "GP/AV": hier.nodes["GP/AV"]["p"] / prob_sum if prob_sum > 0 else 0.50}, "p")
+            return return_probs
 
-    # don't use the haplotype data
-    else:
-        hier_obj.set_attrs({"HS": hier.nodes["PHS"]["p"] + hier.nodes["MHS"]["p"],
-                        "GP/AV": hier.nodes["MGP"]["p"] + hier.nodes["PGP"]["p"] + hier.nodes["AV"]["p"]}, "p")
-        hier_obj.set_attrs({"HS": "segs", "GP/AV": "segs"}, "method")
+    def return_classifier(self, classif):
 
-    ### Tier 3 probabilities
+        X_train, y_train = self.training[classif]
 
-    # for GP vs. AV
-    prob_sum = hier.nodes["MGP"]["p"] + hier.nodes["PGP"]["p"] + hier.nodes["AV"]["p"]
-    hier_obj.set_attrs({"GP": (hier.nodes["PGP"]["p"] + hier.nodes["MGP"]["p"])/prob_sum if prob_sum > 0 else 0.50,
-                        "AV": hier.nodes["AV"]["p"]/prob_sum if prob_sum > 0 else 0.50}, "p")
+        lda = LinearDiscriminantAnalysis()
 
-    # for MHS versus PHS
-    prob_sum = hier.nodes["MHS"]["p"] + hier.nodes["PHS"]["p"]
-    hier_obj.set_attrs({"PHS": prob_sum and hier.nodes["PHS"]["p"]/prob_sum or 0.50,
-                        "MHS": prob_sum and hier.nodes["MHS"]["p"]/prob_sum or 0.50}, "p")
+        lda.fit(X_train, y_train)
 
-    ### Tier 4 probabilities
-
-    # for MGP vs PGP
-    prob_sum = hier.nodes["MGP"]["p"] + hier.nodes["PGP"]["p"]
-    hier_obj.set_attrs({"PGP": hier.nodes["PGP"]["p"]/prob_sum if prob_sum > 0 else 0.50,
-                        "MGP": hier.nodes["MGP"]["p"]/prob_sum if prob_sum > 0 else  0.50}, "p")
-
-    hier_obj.set_attrs({"relatives": 1, "2nd": hier.nodes["2nd"]["p"]}, "post")
-    # iterate down the tree and compute the posterior prob
-    for parent, child in nx.bfs_edges(hier, "2nd"):
-
-        hier_obj.set_attrs({child: hier.nodes[child]["p"] * hier.nodes[parent]["post"]}, "post")
-
-        # need to order according to genetically youngest --> oldest
-        if child in ["GP", "MGP", "PGP", "AV", "GP/AV"]:
-
-            # use age
-            if samples.nodes[id1]["age"] > samples.nodes[id2]["age"]:
-                hier.nodes[child]["ordering"] = (id2, id1)
-                hier.nodes[child]["ordering_method"] = "age"
-            elif samples.nodes[id2]["age"] > samples.nodes[id1]["age"]:
-                    hier.nodes[child]["ordering"] = (id1, id2)
-                    hier.nodes[child]["ordering_method"] = "age"  
-
-            # use the haplotype score      
-            elif use_hap:
-                if samples.edges[id1, id2]["h"][id1] > samples.edges[id1, id2]["h"][id2]:
-                    hier.nodes[child]["ordering"] = (id1, id2)
-                    hier.nodes[child]["ordering_method"] = "hap"
-                else:
-                    hier.nodes[child]["ordering"] = (id2, id1)
-                    hier.nodes[child]["ordering_method"] = "hap"
-
-def readable_results(results, min_p):
-
-    out_results = []
-    for (id1, id2), hier in results.items():
-
-        # compute lengths of all paths from relatives
-        paths = nx.single_source_shortest_path_length(hier, "relatives")
-
-        # highly probable rels
-        probable_rels = sorted([[l and 1/l or np.inf, rel] for rel, l in paths.items() if hier.nodes[rel]["post"] > min_p])
-
-        # get the deepest rel
-        deepest_rel = probable_rels[0][1]
-        
-        # get the degree of relative
-        degree = nx.shortest_path(hier, "relatives", deepest_rel)[1] if deepest_rel != "relatives" else "relatives"
-        
-        rel_data = hier.nodes[deepest_rel]
-
-        row = list(rel_data["ordering"]) + [rel_data[col] for col in ["ordering_method", "post", "p", "method"]] + [deepest_rel, degree]
-        row += [hier.nodes["pair_data"]["ibd1"], hier.nodes["pair_data"]["ibd2"]]
-        out_results.append(row)
-
-    results_df = pd.DataFrame(out_results, columns=["id1", "id2", "order_method", "posterior", "conditional", "method", "relationship", "degree", "ibd1", "ibd2"])
+        return lda
     
-    return results_df.round(4)
+    # returns an array of the probabilities and an iterator of the classes that each probability describes
+    def predict_proba(self, classif, X=[]):
+
+        # get the training data for the classifier
+        X_train, y_train = self.training[classif]
+
+        # no training data supplied --> perform leave one out
+        if len(X)==0:
+            return self.leaveOneOut(X_train, y_train, lambda lda, X: lda.predict_proba(X), labels=True)
+
+        lda = self.return_classifier(classif)
+ 
+        return lda.predict_proba(X), it.cycle([lda.classes_])
+
+    # predicts just the label
+    def predict(self, classif, X=[]):
+        lda = LinearDiscriminantAnalysis()
+        X_train, y_train = self.training[classif]
+
+        # perform leave-one-out
+        if len(X)==0:
+            return self.leaveOneOut(X_train, y_train, lda, lambda lda, X: lda.predict(X), labels=False)
+
+        lda = self.return_classifier(classif)
+
+        return lda.predict(X)
+    
+    def write_pkl(self, classif, output):
+
+        lda = self.return_classifier(classif)
+
+        i = open(output, "wb")
+        pkl.dump(lda, i)
+        i.close()
+
+
+class ResultsData:
+    def __init__(self, samples, pairs, df=pd.DataFrame()):
+
+        self.samples = samples
+        self.pairs = pairs
+        self.df = self.samples.to_dataframe([], include_edges=False) if df.shape[0]==0 else df
+
+    # writes out a human readable output; can specificy the columns
+    def write_readable(self, output, **kwargs):
+
+        cols = kwargs.get("columns",
+                          ["id1", "id2", "k_ibd1", "k_ibd2", "most_probable", "probability"])
+        
+        if "h1" in cols:
+            self.df["h1"], self.df["h2"] = zip(*self.df.apply(lambda x: [x.h[x.id1], x.h[x.id2]], axis=1))
+
+        self.df[cols].to_csv(output, index=False, sep="\t")
+
+    # creates the dataframe
+    def to_dataframe(self, edges, include_edges, inplace=False):
+
+        tmp = self.samples.to_dataframe(edges, include_edges)
+
+        if inplace:
+            self.df = tmp
+        else:
+            return tmp
+
+    # takes as input a function that works on the dataframe and subsets it
+    def subset_dataframe(self, func, inplace=False):
+        tmp = self.df[self.df.apply(lambda x: func(x), axis=1)]
+
+        if inplace:
+            self.df = tmp
+        else:
+            return tmp
+        
+    def subset_samples(self, func):
+
+        self.subset_dataframe(func, inplace=True)
+
+        self.samples.edge_subset(self.df[["id1", "id2"]].apply(tuple, axis=1).values, inplace=True)
+
+    # sets the min prob for readable format; can be rerun with new probs
+    def set_min_probability(self, min_p, update_attrs=False):
+        self.df["most_probable"], self.df["probability"] = zip(*self.df["probs"].apply(lambda x: x.most_probable(min_p)))
+
+        if update_attrs:
+            self.samples.update_edges(self.df[["id1","id2"]].values, self.samples["most_probable"].values, "most_probable")
+            self.samples.update_edges(self.df[["id1","id2"]].values, self.samples["most_probable"].values, "probability")
+
+    # recomputes probs across all rows of df
+    def compute_probs(self):
+        self.df["probs"].apply(lambda x: x.compute_probs())
+
+    # pickles the object
+    def pickle_it(self, output):
+        self.df = None
+        # self.samples = None
+        i = open(output, "wb")
+        pkl.dump(self, i)
+        i.close()
+
+    def most_likely_among(self, nodes, update_attrs=False):
+        likely_among = self.df["probs"].apply(lambda x: nodes[np.argmax([x.hier.nodes[node]["p"] for node in nodes])]).values
+
+        if update_attrs:
+            self.samples.update_edges(zip(self.df[["id1","id2"]].values, likely_among), "likely_among")
+
+        else:
+            return likely_among
+
+
+
+def PONDEROSA(samples, **kwargs):
+
+    pedigree = Pedigree(samples=samples, pedigree_file="pedigree_codes.yaml", tree_file="tree_codes.yaml")
+    pedigree.find_all_relationships()
+
+    pairs = pedigree.hier
+
+    training = Classifiers(pairs)
+
+
+
+    if kwargs.get("assess", True):
+
+        unknown_df = samples.to_dataframe(pairs.get_pairs("relatives"), include_edges=True).dropna(subset=["k_prop"])
+
+    else:
+
+        # get all close relatives to exclude
+        found_close = list(pairs.get_nodes_from(["2nd", "PO", "FS"]))
+
+        # make a dataframe of all pairs that are not close relatives
+        unknown_df = samples.to_dataframe(found_close, include_edges=False)
+
+    unknown_df = unknown_df.reset_index()
+
+
+    unknown_df["ibd_cov"] = unknown_df.apply(lambda x: x.ibd1 + x.ibd2, axis=1)
+
+    # predict the degree of relatedness
+    # unknown_df["predicted_degree"] = training.predict("degree", unknown_df[["k_ibd1", "k_ibd2"]].values)
+
+
+    # get the degree probabilities
+    probs, labels = training.predict_proba("degree", unknown_df[["k_ibd1", "k_ibd2"]].values)
+
+    # add the probabilities to the tree
+    for (_, row), prob in zip(unknown_df.iterrows(), probs):
+        row["probs"].add_probs(list(zip(next(labels), prob)), "ibd")
+
+    if kwargs.get("assess", True):
+
+        second_pairs = samples.to_dataframe(pairs.get_pairs("2nd"), include_edges=True)[["id1", "id2"]]
+        second = unknown_df.merge(second_pairs, on=["id1", "id2"], how="inner")
+
+    else:
+        second = unknown_df[unknown_df["probs"].apply(lambda x: x.hier.nodes["2nd"]["p_con"] > 0.2)]
+
+
+    # get the n_ibd segs classifier probabilities
+    probs, labels = training.predict_proba("n", second[["ibd_cov", "n"]].values)
+    # add the probabilities to the tree
+    for (_, row), prob in zip(second.iterrows(), probs):
+        row["probs"].add_probs(list(zip(next(labels), prob)), "nsegs")
+
+        # for each of these nodes, take the sum of the two children
+        for node in ["GP", "GPAV", "HS"]:
+            # array of the children probabilities
+            child_probs = [row["probs"].hier.nodes[i]["p_con"] for i in row["probs"].hier.successors(node)]
+            # add the probability
+            row["probs"].add_probs(node, p_con=sum(child_probs), method="nsegs")
+
+
+    # get the probabilities from the hap score classifier
+    probs, labels = training.predict_proba("hap", second.apply(lambda x: sorted([h for _,h in x.h.items()], reverse=True), axis=1).values.tolist())
+    
+    for (_, row), prob in zip(second.iterrows(), probs):
+        # get the index of the Phase error class
+        classes = list(next(labels))
+        pe_index = classes.index("Phase error"); del classes[pe_index]
+        # the chance of high Phase error is high; do not update the HS or GPAV probabilities
+        if prob[pe_index] < 0.2:
+            row["probs"].add_probs(list(zip(classes, np.delete(prob, pe_index))), "hap")
+
+    samples.edge_subset(unknown_df[["id1", "id2"]].apply(lambda x: tuple(x), axis=1).values, inplace=True)
+
+    relatives_obj = ResultsData(samples=samples, pairs=pairs, df=unknown_df)
+    relatives_obj.compute_probs()
+    relatives_obj.set_min_probability(kwargs.get("min_p", 0.5))
+    relatives_obj.write_readable(kwargs.get("output", "test.txt"))
+    relatives_obj.subset_samples(lambda x: x.probs.hier.nodes["2nd"]["p"] > 0.5)
+    relatives_obj.pickle_it("test.pkl")
+
+
+if __name__ == "__main__":
+
+        # samples = SampleData(fam_file="for_dev/Himba_allPO.fam",
+    #                 king_file="for_dev/King_Relatedness_no2278.seg",
+    #                 ibd_file="for_dev/Himba_shapeit.chr1_segments.txt",
+    #                 map_file="for_dev/newHimba_shapeit.chr1.map",
+    #                 code_yaml="tree_codes.yaml")
+    
+    # i = open("for_dev/sample.pkl", "wb")
+    # pkl.dump(samples, i)
+    # i.close()
+
+    i = open("for_dev/sample.pkl", "rb")
+    samples = pkl.load(i)
 
 
 if __name__ == "__main__":
@@ -533,3 +685,146 @@ if __name__ == "__main__":
     # get the readable results df
     results_df = readable_results(out_hiers, args.min_p)
     results_df.to_csv(f"{args.out}_results.txt", sep="\t", index=False)
+
+
+'''
+Depcrecated
+
+def infer_second(id1, id2, pair_data, samples,
+                mhs_gap, gp_gap):
+
+    ### Re-compute probabilities based on phenotypic data (parents, age, etc)
+    hier_obj = pair_data["probs"]
+    hier = hier_obj.hier
+
+    ### bool is True if we want to use the haplotype classifier
+    use_hap = hier.nodes["HS"]["p"] + hier.nodes["GP/AV"]["p"] >= 0.80
+
+    ### Use phenotype data to set certain relationships to 0
+
+    # get the age gap
+    age_gap = abs(samples.nodes[id1]["age"] - samples.nodes[id2]["age"])
+
+    # too far in age to be MHS
+    if age_gap > mhs_gap:
+        hier.nodes["MHS"]["p"] = 0
+        hier.nodes["MHS"]["method"] = "pheno"
+        hier.nodes["PHS"]["method"] = "pheno"
+
+    # too close in age to be GP
+    if age_gap < gp_gap:
+        hier_obj.set_attrs({i: 0 for i in ["PGP", "MGP", "GP"]}, "p")
+        hier_obj.set_attrs({i: "pheno" for i in ["PGP", "MGP", "GP"]}, "method")
+
+    # not a paternal relationship
+    if samples.nodes[id1]["father"] != None or samples.nodes[id2]["father"] != None:
+        # not PHS
+        hier.nodes["PHS"]["p"] = 0
+        hier.nodes["PHS"]["method"] = "pheno"
+        hier.nodes["MHS"]["method"] = "pheno"
+
+    # not MHS bc mother exists
+    if samples.nodes[id1]["mother"] != None or samples.nodes[id2]["mother"] != None:
+        hier.nodes["MHS"]["p"] = 0
+        hier.nodes["MHS"]["method"] = "pheno"
+        hier.nodes["PHS"]["method"] = "pheno"
+
+    # re-compute probabilities
+    second_nodes = ["AV", "MGP", "PGP", "PHS", "MHS"]
+    prob_sum = sum([hier.nodes[i]["p"] for i in second_nodes])
+    hier_obj.set_attrs({i: prob_sum and hier.nodes[i]["p"] / prob_sum or 0 for i in second_nodes}, "p")
+
+    ### Done with pheno data
+
+    ### Tier 2 probabilities
+
+    # they are NOT hs; have to be GP/AV
+    if hier.nodes["PHS"]["p"] + hier.nodes["MHS"]["p"] == 0:
+        hier_obj.set_attrs({"HS": 0, "GP/AV": 1}, "p")
+        hier_obj.set_attrs({"HS": "pheno"}, "method")
+
+    # use haplotype data
+    if use_hap:
+        prob_sum = hier.nodes["HS"]["p"] + hier.nodes["GP/AV"]["p"]
+        hier_obj.set_attrs({"HS": hier.nodes["HS"]["p"] / prob_sum if prob_sum > 0 else 0.50,
+                            "GP/AV": hier.nodes["GP/AV"]["p"] / prob_sum if prob_sum > 0 else 0.50}, "p")
+
+    # don't use the haplotype data
+    else:
+        hier_obj.set_attrs({"HS": hier.nodes["PHS"]["p"] + hier.nodes["MHS"]["p"],
+                        "GP/AV": hier.nodes["MGP"]["p"] + hier.nodes["PGP"]["p"] + hier.nodes["AV"]["p"]}, "p")
+        hier_obj.set_attrs({"HS": "segs", "GP/AV": "segs"}, "method")
+
+    ### Tier 3 probabilities
+
+    # for GP vs. AV
+    prob_sum = hier.nodes["MGP"]["p"] + hier.nodes["PGP"]["p"] + hier.nodes["AV"]["p"]
+    hier_obj.set_attrs({"GP": (hier.nodes["PGP"]["p"] + hier.nodes["MGP"]["p"])/prob_sum if prob_sum > 0 else 0.50,
+                        "AV": hier.nodes["AV"]["p"]/prob_sum if prob_sum > 0 else 0.50}, "p")
+
+    # for MHS versus PHS
+    prob_sum = hier.nodes["MHS"]["p"] + hier.nodes["PHS"]["p"]
+    hier_obj.set_attrs({"PHS": prob_sum and hier.nodes["PHS"]["p"]/prob_sum or 0.50,
+                        "MHS": prob_sum and hier.nodes["MHS"]["p"]/prob_sum or 0.50}, "p")
+
+    ### Tier 4 probabilities
+
+    # for MGP vs PGP
+    prob_sum = hier.nodes["MGP"]["p"] + hier.nodes["PGP"]["p"]
+    hier_obj.set_attrs({"PGP": hier.nodes["PGP"]["p"]/prob_sum if prob_sum > 0 else 0.50,
+                        "MGP": hier.nodes["MGP"]["p"]/prob_sum if prob_sum > 0 else  0.50}, "p")
+
+    hier_obj.set_attrs({"relatives": 1, "2nd": hier.nodes["2nd"]["p"]}, "post")
+    # iterate down the tree and compute the posterior prob
+    for parent, child in nx.bfs_edges(hier, "2nd"):
+
+        hier_obj.set_attrs({child: hier.nodes[child]["p"] * hier.nodes[parent]["post"]}, "post")
+
+        # need to order according to genetically youngest --> oldest
+        if child in ["GP", "MGP", "PGP", "AV", "GP/AV"]:
+
+            # use age
+            if samples.nodes[id1]["age"] > samples.nodes[id2]["age"]:
+                hier.nodes[child]["ordering"] = (id2, id1)
+                hier.nodes[child]["ordering_method"] = "age"
+            elif samples.nodes[id2]["age"] > samples.nodes[id1]["age"]:
+                    hier.nodes[child]["ordering"] = (id1, id2)
+                    hier.nodes[child]["ordering_method"] = "age"  
+
+            # use the haplotype score      
+            elif use_hap:
+                if samples.edges[id1, id2]["h"][id1] > samples.edges[id1, id2]["h"][id2]:
+                    hier.nodes[child]["ordering"] = (id1, id2)
+                    hier.nodes[child]["ordering_method"] = "hap"
+                else:
+                    hier.nodes[child]["ordering"] = (id2, id1)
+                    hier.nodes[child]["ordering_method"] = "hap"
+
+def readable_results(results, min_p):
+
+    out_results = []
+    for (id1, id2), hier in results.items():
+
+        # compute lengths of all paths from relatives
+        paths = nx.single_source_shortest_path_length(hier, "relatives")
+
+        # highly probable rels
+        probable_rels = sorted([[l and 1/l or np.inf, rel] for rel, l in paths.items() if hier.nodes[rel]["post"] > min_p])
+
+        # get the deepest rel
+        deepest_rel = probable_rels[0][1]
+        
+        # get the degree of relative
+        degree = nx.shortest_path(hier, "relatives", deepest_rel)[1] if deepest_rel != "relatives" else "relatives"
+        
+        rel_data = hier.nodes[deepest_rel]
+
+        row = list(rel_data["ordering"]) + [rel_data[col] for col in ["ordering_method", "post", "p", "method"]] + [deepest_rel, degree]
+        row += [hier.nodes["pair_data"]["ibd1"], hier.nodes["pair_data"]["ibd2"]]
+        out_results.append(row)
+
+    results_df = pd.DataFrame(out_results, columns=["id1", "id2", "order_method", "posterior", "conditional", "method", "relationship", "degree", "ibd1", "ibd2"])
+    
+    return results_df.round(4)
+
+'''

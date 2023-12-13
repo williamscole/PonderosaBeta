@@ -5,6 +5,7 @@ import numpy as np
 from datetime import datetime
 import time
 import argparse
+import logging
 import yaml
 from math import floor, ceil
 # import phasedibd as ibd
@@ -457,6 +458,41 @@ class PedigreeHierarchy:
 
         self.degree_nodes = list(self.hier.successors("relatives"))
 
+        self.levels = {}
+
+        # iterate through the degrees of relatedness
+        for degree in self.hier.successors("relatives"):
+
+            # get the subgraph
+            degree_tree = self.hier.subgraph(set(nx.descendants(self.hier, degree)) | {degree})
+
+            cur_nodes = [node for node in degree_tree if degree_tree.out_degree(node)==0]
+
+            levels = []
+            while len(cur_nodes) > 0:
+                
+                levels.append(cur_nodes)
+
+                nxt_nodes = []
+                parent_nodes = {next(self.hier.predecessors(node)) for node in cur_nodes} - {"relatives"}
+                for nxt in parent_nodes:
+                    add = True
+                    for cur in cur_nodes:
+                        try:
+                            if nx.dijkstra_path_length(self.hier, nxt, cur) > 1:
+                                add = False
+                                break
+                        except:
+                            continue
+
+                    if add:
+                        nxt_nodes.append(nxt)
+
+                cur_nodes = nxt_nodes[:]
+
+            self.levels[degree] = levels
+    
+
     ### This set of functions is for holding/managing/plotting the hierarchy for a pair of individuals
     ##################################################################################################
 
@@ -492,31 +528,37 @@ class PedigreeHierarchy:
                 self.hier.nodes[node]["p_con"] /= p
                 self.hier.nodes[node]["p"] = self.hier.nodes[node]["p_con"]*self.hier.nodes[parent]["p"]
 
+
     # starting at the root, traverses the path of most probable relationships until it reaches a probability below min_p
     def most_probable(self, min_p):
+
+        # get the most probable degree of relatedness
+        degree_nodes = [(self.hier.nodes[node]["p"], node) for node in nx.descendants_at_distance(self.hier, "relatives", 1)]
+        degree_nodes.sort(reverse=True, key=lambda x: -1 if np.isnan(x[0]) else x[0])
+
+        degree_p, degree = degree_nodes[0]
+
+        if degree_p < min_p:
+            return degree, degree_p
+
+        levels = self.levels[degree]
         
-        max_node, max_p = "relatives", 1
+        # matrix holds the probabilities
+        prob_matrix = np.zeros((len(levels), max([len(i) for i in levels])))
 
-        while True:
+        # add the probabilities to the prob matrix
+        for index, level in enumerate(levels):
+            prob_matrix[index,:len(level)] += np.array([self.hier.nodes[node]["p"] for node in level])
 
-            # iterate through the children and keep track of their probs
-            probable_children = [(-1, None)]
-            for node in nx.descendants_at_distance(self.hier, max_node, 1):
-                probable_children.append([self.hier.nodes[node]["p"], node])
+        # get lowest level where there is a at least one relationship prob > min_p
+        level_index = np.where(prob_matrix > min_p)[0][0]
 
-            # sort the children by their probability
-            probable_children.sort(key=lambda x: x[0], reverse=True)
+        # at the lowest level, get the index of the rel with the highest prob
+        node_index = np.argmax(prob_matrix, axis=1)[level_index]
 
-            # get the highest prob of the current children
-            cur_p = probable_children[0][0]
+        # return the relationship and the prob
+        return levels[level_index][node_index], prob_matrix[level_index][node_index]
 
-            # only continue if the current p is greater than the min
-            if cur_p < min_p:
-                break
-
-            max_p, max_node = probable_children[0]
-
-        return max_node, max_p
  
     # plots the hierarchy and the associated probabilities
     def plot_hierarchy(self, in_g, min_display_p=-1):
@@ -542,7 +584,7 @@ class PedigreeHierarchy:
             ax.plot([x1, x2], [y1, y2], color="black", zorder=0)
 
         # colormap used for choosing the color of the nodes
-        cmap = mpl.colormaps['autumn_r'].resampled(8)
+        cmap = mpl.colormaps['autumn_r']._resample(8)
 
         # add the probabilities
         for node, coords in pos.items():
@@ -783,6 +825,16 @@ class Pedigree:
         # keep track of the dummy id number
         self.n = 1
 
+        self.logger = logging.getLogger("pedigree")
+
+        log = logging.FileHandler("pedigree.log", "w")
+
+        self.logger.addHandler(log)
+        self.logger.setLevel(logging.INFO)
+
+        self.logger.info(f"PONDEROSA pedigree mode\nStarted {time.strftime('%Y-%m-%d %H:%M')}\n")
+
+
     # for a given focal individual, finds all relationships
     def focal_relationships(self, focal):
         # recursive function that, given a focal individual returns all paths to relatives
@@ -902,8 +954,9 @@ class Pedigree:
         gmm = GaussianMixture(n_components=2,
                               means_init=[[0.5, 0], [0.5, 0.25]],
                               covariance_type="spherical").fit(sib_df[["k_ibd1", "k_ibd2"]].values.tolist())
-        print(f"Trained sibling GMM. Half-sibling means are ibd1={round(gmm.means_[0][0], 2)}, ibd2={round(gmm.means_[0][1], 2)}")
-        print(f"Full-sibling means are ibd1={round(gmm.means_[1][0], 2)}, ibd2={round(gmm.means_[1][1], 2)}\n")
+
+        self.logger.info(f"\nTrained sibling GMM. Half-sibling means are ibd1={round(gmm.means_[0][0], 2)}, ibd2={round(gmm.means_[0][1], 2)}")
+        self.logger.info(f"Full-sibling means are ibd1={round(gmm.means_[1][0], 2)}, ibd2={round(gmm.means_[1][1], 2)}\n")
         
         # predict whether FS or HS
         sib_df["predicted"] = gmm.predict(sib_df[["k_ibd1", "k_ibd2"]].values.tolist())
@@ -920,7 +973,7 @@ class Pedigree:
         tmp.add_edges_from([i[:2] for i in new_parents])
         nx.set_node_attributes(tmp, {parent: {"sex": sex, "age": np.nan} for parent, _, sex in new_parents})
         
-        print(f"Added {self.n} missing parents that are shared between full-siblings.")
+        self.logger.info(f"Added {self.n} missing parents that are shared between full-siblings.\n")
 
         # reassign
         self.po = tmp
@@ -932,11 +985,11 @@ class Pedigree:
 
         unknown_rels = it.chain(*[self.focal_relationships(focal) for focal in self.po.nodes])
 
-        print("The following unknown relationships were found:")
+        self.logger.info("The following unknown relationships were found:")
 
         for unkr, n in Counter(unknown_rels).items():
-            print(f"{n} of the following were found:")
-            print(unkr + "\n")
+            self.logger.info(f"{n} of the following were found:")
+            self.logger.info(unkr + "\n")
 
 
 
