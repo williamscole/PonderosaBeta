@@ -4,18 +4,15 @@ import pickle as pkl
 import networkx as nx
 import argparse
 import os
-from collections import Counter, namedtuple
-from math import floor, ceil
+from collections import namedtuple
 import itertools as it
 import yaml
-from sklearn.mixture import GaussianMixture
 from sklearn.model_selection import LeaveOneOut
 
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
-import matplotlib.pyplot as plt
 from copy import deepcopy
 
-from pedigree_tools import ProcessSegments, Pedigree, PedigreeHierarchy, SiblingClassifier, TrainPonderosa, introduce_phase_error
+from pedigree_tools import ProcessSegments, Pedigree, PedigreeHierarchy, introduce_phase_error
 
 ''' Ponderosa can take as input a file (e.g., containing IBD segments) that has all chromosomes
 represented, in which case it does not expect chr1 to be in the file name. Otherwise, if the files
@@ -365,10 +362,13 @@ class ResultsData:
     def write_readable(self, output, **kwargs):
 
         cols = kwargs.get("columns",
-                          ["id1", "id2", "k_ibd1", "k_ibd2", "most_probable", "probability"])
+                          ["id1", "id2", "k_ibd1", "k_ibd2", "most_probable", "probability", "degree"])
         
         if "h1" in cols:
             self.df["h1"], self.df["h2"] = zip(*self.df.apply(lambda x: [x.h[x.id1], x.h[x.id2]], axis=1))
+
+        if "degree" in cols:
+            self.df["degree"] = self.df["probs"].apply(lambda x: x.degree_nodes[np.argmax([x.hier.nodes[node]["p"] for node in x.degree_nodes])])
 
         self.df[cols].to_csv(output, index=False, sep="\t")
 
@@ -584,151 +584,151 @@ if __name__ == "__main__":
               output=args.output)
 
 
-# if __name__ == "__main__":
-
-#     args = parse_args()
-
-#     ### Samples is a SampleData obj that has all node and pairwise IBD information
-#     if args.debug:
-#         print("In debug mode.")
-#         i = open("Samples_debug.pkl", "rb")
-#         Samples = pkl.load(i)
-#         i.close()
-
-#     else:
-#         Samples = SampleData(fam_file=args.fam,
-#                             ibd_file=args.ibd,
-#                             age_file=args.ages,
-#                             map_file=args.map,
-#                             pop_file=args.populations,
-#                             population=args.population,
-#                             n_pairs=args.n_pairs)
-
-#     ### Training step
-    
-#     # True if there is already trained data; load the pickled training objs
-#     if os.path.exists(args.training):
-#         print("Trained classifiers provided.")
-
-#         # load the degree classifier
-#         # proba goes: [2nd, 3rd, 4th, FS]
-#         infile = open(args.training, "rb")
-#         degree_classfr = pkl.load(infile)
-
-#         # load the n segs classifier
-#         # probs go ['AV', 'MGP', 'MHS', 'PGP', 'PHS']
-#         infile = open(args.training.replace("degree", "nsegs"), "rb")
-#         nsegs_classfr = pkl.load(infile)
-
-#         # load the hap classifier
-#         # probs go ['GP/AV', 'HS', 'PhaseError']
-#         infile = open(args.training.replace("degree", "hap"), "rb")
-#         hap_classfr = pkl.load(infile)
-
-#     # pedigree object to find existing relationships
-#     print("Finding pedigree relationships")
-#     if args.debug:
-#         i = open("Pedigree_debug.pkl", "rb")
-#         pedigree = pkl.load(i)
-#         i.close()
-#     else:
-#         try:
-#             pedigree = Pedigree(Samples.g, degree_classfr)
-#         except:
-#             pedigree = Pedigree(Samples.g, None)
-
-#         # find relationships
-#         pedigree.find_relationships()
-
-#     # no training provided; generate by self
-#     if not os.path.exists(args.training):
-#         print("Trained classifiers not provided. Training classifiers now.")
-
-#         # get the training data
-#         train = TrainPonderosa(real_data=True, samples=Samples, pedigree=pedigree)
-
-#         ### haplotype classifier
-#         hap_classfr = train.hap_classifier()
-
-#         ### n segs classifier
-#         nsegs_classfr = train.nsegs_classifier()
-
-#         ### degree classifier
-#         degree_classfr = train.degree_classifier()
-
-#     ### Classification step 1: degree of relatedness
-#     print("Beginning classification.")
-
-#     # get the input data; X has the following cols: id1, id2, ibd1, ibd2
-#     edges, X_degree = Samples.get_edge_data(["ibd1", "ibd2"], lambda x: (0 < x["k"] < 0.42) or (0.1 < x["ibd2"] < 0.5))
-#     degree_probs = degree_classfr.predict_proba(X_degree)
-
-#     # add the classification probs
-#     Samples.update_probs(edges, degree_probs, degree_classfr.classes_, "ibd")
-
-#     ### Classification step 2: n of segs
-#     edges, X_n = Samples.get_edge_data(["n", "k"], lambda x: x["probs"].hier.nodes["2nd"]["p"] > 0.80)
-#     n_probs = nsegs_classfr.predict_proba(X_n)
-
-#     # add the n probs
-#     Samples.update_probs(edges, n_probs, nsegs_classfr.classes_, "segs")
-
-#     ### Classification step 3: haps
-#     edges, X_hap = Samples.get_edge_data(["h"], lambda x: x["probs"].hier.nodes["2nd"]["p"] > 0.80)
-
-#     # retrieve h1 and h2 values and predict the probs
-#     haps = [[h[0][id1], h[0][id2]] for (id1, id2), h in zip(edges, X_hap)]
-#     h_probs = hap_classfr.predict_proba(haps)
-
-#     # update the hap probs
-#     # get the index of the GPAV and HS classes
-#     class_index = np.where(hap_classfr.classes_ != "PhaseError")[0]
-#     Samples.update_probs(edges, h_probs[:,class_index], hap_classfr.classes_[class_index] , "hap")
-
-#     ### Inference steps
-
-#     # hold the hier objects
-#     out_hiers = {}
-
-#     # iterate through the pairs
-#     for id1, id2, data in Samples.g.edges(data=True):
-
-#         # get the pair data
-#         pair_data = data.copy()
-
-#         # infer the rel if second
-#         if pair_data["probs"].hier.nodes["2nd"]["p"] > 0.80:
-#             infer_second(id1, id2, pair_data, Samples.g, 30, 30)
-
-#         else:
-#             pair_data["probs"].set_attrs({i: j.get("p" if i != "relatives" else "post", 1) for i,j in pair_data["probs"].hier.nodes(data=True)}, "post")
-
-#         hier = pair_data["probs"].hier
-
-#         # add the pair data as a node with attributes
-#         hier.add_node("pair_data",
-#                       h=pair_data["h"],
-#                       n=pair_data["n"],
-#                       ibd1=pair_data["ibd1"],
-#                       ibd2=pair_data["ibd2"])
-        
-#         # add the ids as nodes so you can get the pair info
-#         hier.add_nodes_from(Samples.g.subgraph({id1, id2}).nodes(data=True))
-
-#         out_hiers[(id1, id2)] = hier
-
-#     # write out a pickle object of the results
-#     outf = open(f"{args.out}_results.pkl", "wb")
-#     pkl.dump(out_hiers, outf)
-#     outf.close()
-
-#     # get the readable results df
-#     results_df = readable_results(out_hiers, args.min_p)
-#     results_df.to_csv(f"{args.out}_results.txt", sep="\t", index=False)
-
-
 '''
 Depcrecated
+if __name__ == "__main__":
+
+    args = parse_args()
+
+    ### Samples is a SampleData obj that has all node and pairwise IBD information
+    if args.debug:
+        print("In debug mode.")
+        i = open("Samples_debug.pkl", "rb")
+        Samples = pkl.load(i)
+        i.close()
+
+    else:
+        Samples = SampleData(fam_file=args.fam,
+                            ibd_file=args.ibd,
+                            age_file=args.ages,
+                            map_file=args.map,
+                            pop_file=args.populations,
+                            population=args.population,
+                            n_pairs=args.n_pairs)
+
+    ### Training step
+    
+    # True if there is already trained data; load the pickled training objs
+    if os.path.exists(args.training):
+        print("Trained classifiers provided.")
+
+        # load the degree classifier
+        # proba goes: [2nd, 3rd, 4th, FS]
+        infile = open(args.training, "rb")
+        degree_classfr = pkl.load(infile)
+
+        # load the n segs classifier
+        # probs go ['AV', 'MGP', 'MHS', 'PGP', 'PHS']
+        infile = open(args.training.replace("degree", "nsegs"), "rb")
+        nsegs_classfr = pkl.load(infile)
+
+        # load the hap classifier
+        # probs go ['GP/AV', 'HS', 'PhaseError']
+        infile = open(args.training.replace("degree", "hap"), "rb")
+        hap_classfr = pkl.load(infile)
+
+    # pedigree object to find existing relationships
+    print("Finding pedigree relationships")
+    if args.debug:
+        i = open("Pedigree_debug.pkl", "rb")
+        pedigree = pkl.load(i)
+        i.close()
+    else:
+        try:
+            pedigree = Pedigree(Samples.g, degree_classfr)
+        except:
+            pedigree = Pedigree(Samples.g, None)
+
+        # find relationships
+        pedigree.find_relationships()
+
+    # no training provided; generate by self
+    if not os.path.exists(args.training):
+        print("Trained classifiers not provided. Training classifiers now.")
+
+        # get the training data
+        train = TrainPonderosa(real_data=True, samples=Samples, pedigree=pedigree)
+
+        ### haplotype classifier
+        hap_classfr = train.hap_classifier()
+
+        ### n segs classifier
+        nsegs_classfr = train.nsegs_classifier()
+
+        ### degree classifier
+        degree_classfr = train.degree_classifier()
+
+    ### Classification step 1: degree of relatedness
+    print("Beginning classification.")
+
+    # get the input data; X has the following cols: id1, id2, ibd1, ibd2
+    edges, X_degree = Samples.get_edge_data(["ibd1", "ibd2"], lambda x: (0 < x["k"] < 0.42) or (0.1 < x["ibd2"] < 0.5))
+    degree_probs = degree_classfr.predict_proba(X_degree)
+
+    # add the classification probs
+    Samples.update_probs(edges, degree_probs, degree_classfr.classes_, "ibd")
+
+    ### Classification step 2: n of segs
+    edges, X_n = Samples.get_edge_data(["n", "k"], lambda x: x["probs"].hier.nodes["2nd"]["p"] > 0.80)
+    n_probs = nsegs_classfr.predict_proba(X_n)
+
+    # add the n probs
+    Samples.update_probs(edges, n_probs, nsegs_classfr.classes_, "segs")
+
+    ### Classification step 3: haps
+    edges, X_hap = Samples.get_edge_data(["h"], lambda x: x["probs"].hier.nodes["2nd"]["p"] > 0.80)
+
+    # retrieve h1 and h2 values and predict the probs
+    haps = [[h[0][id1], h[0][id2]] for (id1, id2), h in zip(edges, X_hap)]
+    h_probs = hap_classfr.predict_proba(haps)
+
+    # update the hap probs
+    # get the index of the GPAV and HS classes
+    class_index = np.where(hap_classfr.classes_ != "PhaseError")[0]
+    Samples.update_probs(edges, h_probs[:,class_index], hap_classfr.classes_[class_index] , "hap")
+
+    ### Inference steps
+
+    # hold the hier objects
+    out_hiers = {}
+
+    # iterate through the pairs
+    for id1, id2, data in Samples.g.edges(data=True):
+
+        # get the pair data
+        pair_data = data.copy()
+
+        # infer the rel if second
+        if pair_data["probs"].hier.nodes["2nd"]["p"] > 0.80:
+            infer_second(id1, id2, pair_data, Samples.g, 30, 30)
+
+        else:
+            pair_data["probs"].set_attrs({i: j.get("p" if i != "relatives" else "post", 1) for i,j in pair_data["probs"].hier.nodes(data=True)}, "post")
+
+        hier = pair_data["probs"].hier
+
+        # add the pair data as a node with attributes
+        hier.add_node("pair_data",
+                      h=pair_data["h"],
+                      n=pair_data["n"],
+                      ibd1=pair_data["ibd1"],
+                      ibd2=pair_data["ibd2"])
+        
+        # add the ids as nodes so you can get the pair info
+        hier.add_nodes_from(Samples.g.subgraph({id1, id2}).nodes(data=True))
+
+        out_hiers[(id1, id2)] = hier
+
+    # write out a pickle object of the results
+    outf = open(f"{args.out}_results.pkl", "wb")
+    pkl.dump(out_hiers, outf)
+    outf.close()
+
+    # get the readable results df
+    results_df = readable_results(out_hiers, args.min_p)
+    results_df.to_csv(f"{args.out}_results.txt", sep="\t", index=False)
+
+
 
 def infer_second(id1, id2, pair_data, samples,
                 mhs_gap, gp_gap):

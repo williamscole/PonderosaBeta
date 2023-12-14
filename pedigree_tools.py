@@ -456,7 +456,7 @@ class PedigreeHierarchy:
 
         self.init_nodes = set(self.hier.nodes)
 
-        self.degree_nodes = list(self.hier.successors("relatives"))
+        self.degree_nodes = list(set(self.hier.successors("relatives"))-{"relatives"})
 
         self.levels = {}
 
