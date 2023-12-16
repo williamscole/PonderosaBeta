@@ -8,7 +8,6 @@ from collections import namedtuple
 import itertools as it
 import yaml
 from sklearn.model_selection import LeaveOneOut
-
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 from copy import deepcopy
 
@@ -437,8 +436,6 @@ def PONDEROSA(samples, **kwargs):
 
     training = Classifiers(pairs)
 
-
-
     if kwargs.get("assess", False):
 
         unknown_df = samples.to_dataframe(pairs.get_pairs("relatives"), include_edges=True).dropna(subset=["k_prop"])
@@ -507,7 +504,8 @@ def PONDEROSA(samples, **kwargs):
     relatives_obj.compute_probs()
     relatives_obj.set_min_probability(kwargs.get("min_p", 0.5))
     relatives_obj.write_readable(f"{kwargs.get('output', 'output')}.txt")
-    relatives_obj.subset_samples(lambda x: x.probs.hier.nodes["2nd"]["p"] > 0.5)
+    if not kwargs.get("assess", False):
+        relatives_obj.subset_samples(lambda x: x.probs.hier.nodes["2nd"]["p"] > 0.5)
     relatives_obj.pickle_it(f"{kwargs.get('output', 'output')}_results.pkl")
 
 def parse_args():
