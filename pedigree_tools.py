@@ -528,6 +528,9 @@ class PedigreeHierarchy:
                 self.hier.nodes[node]["p_con"] /= p
                 self.hier.nodes[node]["p"] = self.hier.nodes[node]["p_con"]*self.hier.nodes[parent]["p"]
 
+    def most_likely_among(self, nodes):
+        return nodes[np.argmax([self.hier.nodes[node]["p"] for node in nodes])]
+
     # starting at the root, traverses the path of most probable relationships until it reaches a probability below min_p
     def most_probable(self, min_p):
 
