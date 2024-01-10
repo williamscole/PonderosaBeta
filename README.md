@@ -27,7 +27,7 @@ Running `python pedigree_tools.py -interpolate [options]` will create a Plink-fo
 
 The following arguments are accepted:
 - `-input_map`: the MAP file in which the genetic position needs to be filled in (no header; assumes the columns are: chromosome, SNP ID, cM position filled with 0, physical position)
-- `-map_file`: the file containing genetic map coordinates (no header; requires the following columns: chromosome, cM position, physical position)
+- `-genetic_map`: the file containing genetic map coordinates (no header; requires the following columns: chromosome, cM position, physical position)
 - `-columns`: default is to assume that `map_file` is a Plink MAP-formatted file. Alternatively, you can use this optional argument to specify the 0-indexed index of the chromosome, cM position, and physical position columns (in that order). E.g., `-columns 2 3 4` indicates that the chromosome, cM, and Mb columns are the 3rd, 4th, and 5th columns, respectively.
 - `-sites`: if only a subset of loci are to be output. This file has no headers and expects two columns: chromosome and physical position. This is **optional** and omitting it will include all sites in `input_map`.
 
