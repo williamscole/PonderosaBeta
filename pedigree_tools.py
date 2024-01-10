@@ -530,6 +530,14 @@ class PedigreeHierarchy:
 
     def most_likely_among(self, nodes):
         return nodes[np.argmax([self.hier.nodes[node]["p"] for node in nodes])]
+    
+    def top2(self, nodes):
+        ps = [self.hier.nodes[node]["p"] for node in nodes]
+        top1 = np.argmax(ps)
+        top = [nodes[top1]]
+        del nodes[top1]
+        ps = [self.hier.nodes[node]["p"] for node in nodes]
+        return top + [nodes[np.argmax(ps)]]
 
     # starting at the root, traverses the path of most probable relationships until it reaches a probability below min_p
     def most_probable(self, min_p):
@@ -731,7 +739,6 @@ class Relationship:
         # returns True if the relationship matches
         return np.abs((self.mat - mat)).sum() == 0
         
-
 
 class RelationshipCodes:
     def __init__(self, yaml_file):
@@ -993,9 +1000,6 @@ class Pedigree:
             self.logger.info(f"{n} of the following were found:")
             self.logger.info(unkr + "\n")
 
-
-
-    
     
 class TrainPonderosa:
     def __init__(self, real_data, **kwargs):
@@ -1240,7 +1244,7 @@ def interpolate_map(input_map, map_file, **kwargs):
     cols = kwargs.get("columns", [0, 2, 3])
 
     map_file_df = pd.read_csv(map_file, delim_whitespace=True, header=None)
-    map_file_df = map_file_df.rename({index: col for index, col in zip(cols, ["CHROM", "MB", "CM"])}, axis=1)
+    map_file_df = map_file_df.rename({index: col for index, col in zip(cols, ["CHROM", "CM", "MB"])}, axis=1)
 
     ### Open the in map file
     in_map_df = pd.read_csv(input_map, delim_whitespace=True, header=None, names=["CHROM", "rsID", "CM", "MB"])
@@ -1469,6 +1473,286 @@ class RemoveRelateds:
         
         print(f"Wrote out {len(run.unrelateds)} IDs to keep to 'sim_keep.txt'")
 
+
+def quick_kinship(pair_df):
+    # keep track of cm ibd1, ibd2
+    ibd1, ibd2 = 0, 0
+
+    # iterate through the chromosomes
+    for _, chrom_df in pair_df.groupby("chromosome"):
+        # add a column that is the cm of the ibd segments
+        chrom_df["r"] = chrom_df.apply(lambda x: np.arange(ceil(x.start_cm), floor(x.end_cm)+1), axis=1)
+        chrom_df["sites1"] = chrom_df.apply(lambda x: [(i, x.id1_haplotype) for i in x.r], axis=1)
+        chrom_df["sites2"] = chrom_df.apply(lambda x: [(i, x.id2_haplotype) for i in x.r], axis=1)
+
+        sites1 = [i[0] for i in set(it.chain(*chrom_df.sites1.values))]
+        sites2 = [i[0] for i in set(it.chain(*chrom_df.sites2.values))]
+
+        sites = Counter(sites1 + sites2)
+
+        ibd1 += sum([1 for site, c in sites.items() if c < 4])
+        ibd2 += sum([1 for site, c in sites.items() if c == 4])
+
+    return ibd1, ibd2      
+
+    
+class Karyogram:
+    def __init__(self, map_file, cm = True):
+        if type(map_file) != list:
+            map_file = [map_file]
+
+        df = pd.DataFrame()
+        for mapf in map_file:
+            temp = pd.read_csv(mapf, delim_whitespace=True, header = None)
+            df = pd.concat([df, temp])
+
+        self.chrom_ends = {}
+        self.max_x = 0
+        for chrom, chrom_df in df.groupby(0):
+            self.chrom_ends[chrom] = (min(chrom_df[2 if cm else 3]), max(chrom_df[2 if cm else 3])-min(chrom_df[2]))
+            self.max_x = self.max_x if sum(self.chrom_ends[chrom]) < self.max_x else sum(self.chrom_ends[chrom])
+
+        self.chrom_y = {(chrom, hap): (chrom - 1)*9 + 4*hap for chrom, hap in it.product(np.arange(1, 23), [0, 1])}
+
+    def plot_segments(self, segments, **kwargs):
+
+        # init the figure
+        fig, ax = plt.subplots()
+        fig.set_size_inches(10, 20)
+
+        # add the chromosome templates
+        for chrom, hap in it.product(np.arange(1, 23), [0, 1]):
+            rect = patches.Rectangle((self.chrom_ends[chrom][0], self.chrom_y[(chrom, hap)]),
+                                    self.chrom_ends[chrom][1], 3, edgecolor = "black",
+                                    facecolor = "darkgrey" if hap == 0 else "grey")
+            ax.add_patch(rect)
+
+        # add the segments
+        for chrom, start, stop, hap in segments:
+            facecolor = kwargs.get("hap0_color", "cornflowerblue") if hap == 0 else kwargs.get("hap1_color", "tomato")
+            rect = patches.Rectangle((start, self.chrom_y[(chrom, hap)]), stop - start, 3,
+                                    edgecolor = "black", facecolor = facecolor, alpha = 0.8)
+            ax.add_patch(rect)
+
+        # re-label the y ticks
+        ax.set_yticks([self.chrom_y[(chrom, 0)] + 3.5 for chrom in range(1, 23)])
+        ax.set_yticklabels([str(chrom) for chrom in range(1, 23)])
+
+        # set axes limits, remove spines, modify ticks
+        plt.xlim(0, self.max_x)
+        plt.ylim(-2, self.chrom_y[(22, 1)] + 10)
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.spines['left'].set_visible(False)
+        ax.tick_params(axis='y', which='major', labelsize=16)
+        plt.tick_params(left = False)
+
+        plt.savefig(f"{kwargs.get('file_name', 'karyogram')}.png", dpi = kwargs.get('dpi', 500))
+
+'''This is a function that is designed to resolve half-sibs from FS.
+Given that a pair shares one parent, is it more likely that they also
+share their other parent (and are FS) or that their other parent
+are different. It takes as arguments:
+pedigree: networkx DiGraph where edges indicate parent --> offspring
+pair_data: networkx Graph where edges contain attrs ibd1 and ibd2
+classifier: an sklearn classifier that will spit out 2nd or FS; optional in which case it will train a model'''
+def SiblingClassifier(pedigree, pair_data, dummy_n, classifier=None):
+    # keep track of the sibling pairs
+    sibling_pairs = set()
+
+    # keep track of parentless nodes
+    parentless = set()
+
+    # iterate through all nodes
+    for parent in pedigree.nodes:
+        # get all children
+        children = sorted(nx.descendants_at_distance(pedigree, parent, 1))
+
+        # add all pairs to sibling_pairs
+        sibling_pairs |= set(it.combinations(children, r=2))
+
+        # see if there are any predecessors
+        if len(set(pedigree.predecessors(parent))) == 0:
+            parentless |= {parent}
+
+    # iterate through all edges between parentless nodes
+    for id1, id2, data in pair_data.subgraph(parentless).edges(data=True):
+        # only take putative FS
+        if 0.10 < data["ibd2"] < 0.50:
+            sibling_pairs |= {(id1, id2)}
+
+    # create a df containing the pairs and ther ibd values
+    sib_df = pd.DataFrame(list(sibling_pairs), columns=["id1", "id2"])
+    sib_df["ibd1"] = sib_df.apply(lambda x: pair_data.get_edge_data(x.id1, x.id2, {"ibd1": np.nan})["ibd1"], axis=1)
+    sib_df["ibd2"] = sib_df.apply(lambda x: pair_data.get_edge_data(x.id1, x.id2, {"ibd2": np.nan})["ibd2"], axis=1)
+    sib_df = sib_df.dropna().reset_index(drop=True)
+
+    if sib_df.shape[0] == 0:
+        return dummy_n, pedigree.copy()
+
+    # now get the parents each pair has in common
+    sib_df["parents"] = sib_df.apply(lambda x: set(pedigree.predecessors(x.id1)) & set(pedigree.predecessors(x.id2)), axis=1)
+
+    # they are FS if they have two parents in common and HS if one parent in common AND there is one other parent ruling out their HS
+    sib_df["other_parents"] = sib_df.apply(lambda x: len((set(pedigree.predecessors(x.id1)) | set(pedigree.predecessors(x.id2))) - x.parents) > 0, axis=1)
+    sib_df["half"] = sib_df.apply(lambda x: "FS" if len(x.parents) == 2 else ("2nd" if x.other_parents else np.nan), axis=1)
+
+    ### Now we need to either load the classifier or train one
+    if classifier == None:
+        sibClassif = LinearDiscriminantAnalysis().fit(sib_df.dropna()[["ibd1", "ibd2"]].values, sib_df.dropna()["half"].values)
+
+    # classifier is supplied; use it
+    else:
+        sibClassif = classifier
+
+    # classify the NaN rows, which are putative FS
+    putFS = sib_df[sib_df["half"].isna()].copy()
+    putFS["half"] = sibClassif.predict(putFS[["ibd1", "ibd2"]].values)
+
+    # get a graph of all parentless FS pairs; makes it easier to find clusters of FS
+    FS = nx.Graph()
+    FS.add_weighted_edges_from(putFS[putFS.half=="FS"][["id1", "id2", "parents"]].values)
+
+    # make a copy of the pedigree obj
+    ped_copy = pedigree.copy()
+
+    # iterate through families of FS
+    for fam in nx.connected_components(FS):
+
+        # get the family subgraph
+        sub = FS.subgraph(fam)
+        # the set of the parents 
+        parents = set(it.chain(*[list(e["weight"]) for _,_,e in sub.edges(data=True)]))
+
+        # no parents; create both
+        if len(parents) == 0:
+            # parent names
+            father = f"dummy{dummy_n+1}"
+            mother = f"dummy{dummy_n+2}"
+            dummy_n += 2
+
+            # add the edges and the nodes attrs
+            ped_copy.add_edges_from([[i, j] for i,j in it.product([father, mother], list(fam))])
+            ped_copy.nodes[father]["sex"] = "1"; ped_copy.nodes[father]["age"] = np.nan
+            ped_copy.nodes[mother]["sex"] = "2"; ped_copy.nodes[mother]["age"] = np.nan
+
+        # one parent; create the other parent
+        elif len(parents) == 1:
+            # get the parent
+            parent1 = parents.pop()
+            # name the new parent
+            parent2 = f"dummy{dummy_n+1}"; dummy_n += 1
+
+            # get the sex of the parent and get the sex of the new parent
+            sex1 = pedigree.nodes[parent]["sex"]
+            sex2 = {"0": "0", "1": "2", "2": "1"}[sex1]
+
+            # add the edges and the node attrs of the new parent
+            ped_copy.add_edges_from([[i, j] for i,j in it.product([parent2], list(fam))])
+            ped_copy.nodes[parent2]["sex"] = sex2; ped_copy.nodes[parent2]["age"] = np.nan
+
+    return dummy_n, ped_copy
+
+def remove_missing(vcffile):
+
+    with open(vcffile) as file:
+
+        for lines in file:
+
+            if "#" in lines:
+                print(lines.strip())
+
+            else:
+                lines = lines.replace(".|.", "0|0")
+                lines = lines.replace(".|0", "0|0")
+                lines = lines.replace("0|.", "0|0")
+                lines = lines.replace(".|1", "1|1")
+                lines = lines.replace("1|.", "1|1")
+                print(lines.strip())
+                
+
+def parse_args():
+    parser = argparse.ArgumentParser()
+
+    # args for interpolation
+    parser.add_argument("-interpolate", action="store_true")
+    parser.add_argument("-genetic_map", type=str)
+    parser.add_argument("-input_map", type=str)
+    parser.add_argument("-columns", nargs='+', default=[0, 2, 3], type=int)
+    parser.add_argument("-sites", type=str, default="")
+
+    # args for running phasedibd
+    parser.add_argument("-phasedibd", action="store_true")
+    parser.add_argument("-input_vcf", type=str)
+    parser.add_argument("-output", type=str)
+
+    args = parser.parse_args()
+    return args
+
+
+if __name__ == "__main__":
+
+    args = parse_args()
+
+
+    if args.interpolate:
+        interpolate_map(input_map=args.input_map, map_file=args.genetic_map, columns=args.columns, sites=args.sites)
+
+    if args.phasedibd:
+        run_phasedibd(input_vcf=args.input_vcf, input_map=args.input_map, output=args.output)
+
+
+'''
+Archived code
+
+p = PedigreeNetwork("Himba_allPO.fam")
+p.get_paths()
+
+p = PedSims("")
+p.subset_vcf("plink_keep.txt", "../ponderosa/plink_data/Himba_shapeit.chr1.vcf")
+if __name__ == "__main__":
+    if sys.argv[-1] == "plink_unrelateds":
+        r = RemoveRelateds()
+        r.plink_unrelateds(sys.argv[-3], float(sys.argv[-2]))
+
+    if sys.argv[-1] == "concat_rel":
+        p = PedSims("")
+        with concurrent.futures.ProcessPoolExecutor() as executor:
+            results = [executor.submit(p.run_ibd_iteration, sys.argv[-4], sys.argv[-3], sys.argv[-2], chrom) for chrom in range(1, 23)]
+            ibd_results = pd.concat([f.result() for f in concurrent.futures.as_completed(results)]).reset_index(drop=True)
+        try:
+            df = pd.read_feather("simulated_segments.f")
+            df = pd.concat([df, ibd_results]).reset_index(drop=True)
+        except:
+            df = ibd_results
+
+        df.to_feather("simulated_segments.f")
+
+    if sys.argv[-1] == "missing":
+        remove_missing(sys.argv[-2])
+
+    if sys.argv[-1] == "pop_ibd":
+        p = PedSims("")
+        # map_file, rel, iter, pop, chrom
+        map_file, rel, iter, pop, chrom = [sys.argv[i] for i in range(-6, -1)]
+
+        # run ibd
+        ibd_results = p.run_pop_ibd_iteration(map_file, rel, iter, pop, chrom)
+        
+        ibd_results.reset_index(drop=True).to_csv(f"{pop}/{pop}_chr{chrom}_{rel}{iter}.txt", sep="\t", index=False)
+
+    if sys.argv[-1] == "rename_pop_ibd":
+        segment_file, pop, rel, sim_iter = [sys.argv[i] for i in range(-5, -1)]
+
+        p = PedSims("")
+        p.rename_ibd_segments(segment_file, pop, rel, sim_iter)
+
+    if sys.argv[-1] == "interpolate":
+        interpolate_map(sys.argv[-3], sys.argv[-2])
+    if sys.argv[-1] == "subset_vcf":
+        p = PedSims("")
+        p.subset_vcf(sys.argv[-3], sys.argv[-2])
+        
 
 class PedSims:
 
@@ -1947,28 +2231,6 @@ class PedSims:
     def get_items(self):
         return self.famG, self.ibd, self.root_nodes
 
-def quick_kinship(pair_df):
-    # keep track of cm ibd1, ibd2
-    ibd1, ibd2 = 0, 0
-
-    # iterate through the chromosomes
-    for _, chrom_df in pair_df.groupby("chromosome"):
-        # add a column that is the cm of the ibd segments
-        chrom_df["r"] = chrom_df.apply(lambda x: np.arange(ceil(x.start_cm), floor(x.end_cm)+1), axis=1)
-        chrom_df["sites1"] = chrom_df.apply(lambda x: [(i, x.id1_haplotype) for i in x.r], axis=1)
-        chrom_df["sites2"] = chrom_df.apply(lambda x: [(i, x.id2_haplotype) for i in x.r], axis=1)
-
-        sites1 = [i[0] for i in set(it.chain(*chrom_df.sites1.values))]
-        sites2 = [i[0] for i in set(it.chain(*chrom_df.sites2.values))]
-
-        sites = Counter(sites1 + sites2)
-
-        ibd1 += sum([1 for site, c in sites.items() if c < 4])
-        ibd2 += sum([1 for site, c in sites.items() if c == 4])
-
-    return ibd1, ibd2
-    
-
     def run_phasedibd(self, args):
 
         import phasedibd as ibd
@@ -2062,267 +2324,4 @@ def quick_kinship(pair_df):
 
             print(ibd1, ibd2)
 
-
-
-
-
-
-            
-
-    
-        
-        
-
-class Karyogram:
-    def __init__(self, map_file, cm = True):
-        if type(map_file) != list:
-            map_file = [map_file]
-
-        df = pd.DataFrame()
-        for mapf in map_file:
-            temp = pd.read_csv(mapf, delim_whitespace=True, header = None)
-            df = pd.concat([df, temp])
-
-        self.chrom_ends = {}
-        self.max_x = 0
-        for chrom, chrom_df in df.groupby(0):
-            self.chrom_ends[chrom] = (min(chrom_df[2 if cm else 3]), max(chrom_df[2 if cm else 3])-min(chrom_df[2]))
-            self.max_x = self.max_x if sum(self.chrom_ends[chrom]) < self.max_x else sum(self.chrom_ends[chrom])
-
-        self.chrom_y = {(chrom, hap): (chrom - 1)*9 + 4*hap for chrom, hap in it.product(np.arange(1, 23), [0, 1])}
-
-    def plot_segments(self, segments, **kwargs):
-
-        # init the figure
-        fig, ax = plt.subplots()
-        fig.set_size_inches(10, 20)
-
-        # add the chromosome templates
-        for chrom, hap in it.product(np.arange(1, 23), [0, 1]):
-            rect = patches.Rectangle((self.chrom_ends[chrom][0], self.chrom_y[(chrom, hap)]),
-                                    self.chrom_ends[chrom][1], 3, edgecolor = "black",
-                                    facecolor = "darkgrey" if hap == 0 else "grey")
-            ax.add_patch(rect)
-
-        # add the segments
-        for chrom, start, stop, hap in segments:
-            facecolor = kwargs.get("hap0_color", "cornflowerblue") if hap == 0 else kwargs.get("hap1_color", "tomato")
-            rect = patches.Rectangle((start, self.chrom_y[(chrom, hap)]), stop - start, 3,
-                                    edgecolor = "black", facecolor = facecolor, alpha = 0.8)
-            ax.add_patch(rect)
-
-        # re-label the y ticks
-        ax.set_yticks([self.chrom_y[(chrom, 0)] + 3.5 for chrom in range(1, 23)])
-        ax.set_yticklabels([str(chrom) for chrom in range(1, 23)])
-
-        # set axes limits, remove spines, modify ticks
-        plt.xlim(0, self.max_x)
-        plt.ylim(-2, self.chrom_y[(22, 1)] + 10)
-        ax.spines['top'].set_visible(False)
-        ax.spines['right'].set_visible(False)
-        ax.spines['left'].set_visible(False)
-        ax.tick_params(axis='y', which='major', labelsize=16)
-        plt.tick_params(left = False)
-
-        plt.savefig(f"{kwargs.get('file_name', 'karyogram')}.png", dpi = kwargs.get('dpi', 500))
-
-'''This is a function that is designed to resolve half-sibs from FS.
-Given that a pair shares one parent, is it more likely that they also
-share their other parent (and are FS) or that their other parent
-are different. It takes as arguments:
-pedigree: networkx DiGraph where edges indicate parent --> offspring
-pair_data: networkx Graph where edges contain attrs ibd1 and ibd2
-classifier: an sklearn classifier that will spit out 2nd or FS; optional in which case it will train a model'''
-def SiblingClassifier(pedigree, pair_data, dummy_n, classifier=None):
-    # keep track of the sibling pairs
-    sibling_pairs = set()
-
-    # keep track of parentless nodes
-    parentless = set()
-
-    # iterate through all nodes
-    for parent in pedigree.nodes:
-        # get all children
-        children = sorted(nx.descendants_at_distance(pedigree, parent, 1))
-
-        # add all pairs to sibling_pairs
-        sibling_pairs |= set(it.combinations(children, r=2))
-
-        # see if there are any predecessors
-        if len(set(pedigree.predecessors(parent))) == 0:
-            parentless |= {parent}
-
-    # iterate through all edges between parentless nodes
-    for id1, id2, data in pair_data.subgraph(parentless).edges(data=True):
-        # only take putative FS
-        if 0.10 < data["ibd2"] < 0.50:
-            sibling_pairs |= {(id1, id2)}
-
-    # create a df containing the pairs and ther ibd values
-    sib_df = pd.DataFrame(list(sibling_pairs), columns=["id1", "id2"])
-    sib_df["ibd1"] = sib_df.apply(lambda x: pair_data.get_edge_data(x.id1, x.id2, {"ibd1": np.nan})["ibd1"], axis=1)
-    sib_df["ibd2"] = sib_df.apply(lambda x: pair_data.get_edge_data(x.id1, x.id2, {"ibd2": np.nan})["ibd2"], axis=1)
-    sib_df = sib_df.dropna().reset_index(drop=True)
-
-    if sib_df.shape[0] == 0:
-        return dummy_n, pedigree.copy()
-
-    # now get the parents each pair has in common
-    sib_df["parents"] = sib_df.apply(lambda x: set(pedigree.predecessors(x.id1)) & set(pedigree.predecessors(x.id2)), axis=1)
-
-    # they are FS if they have two parents in common and HS if one parent in common AND there is one other parent ruling out their HS
-    sib_df["other_parents"] = sib_df.apply(lambda x: len((set(pedigree.predecessors(x.id1)) | set(pedigree.predecessors(x.id2))) - x.parents) > 0, axis=1)
-    sib_df["half"] = sib_df.apply(lambda x: "FS" if len(x.parents) == 2 else ("2nd" if x.other_parents else np.nan), axis=1)
-
-    ### Now we need to either load the classifier or train one
-    if classifier == None:
-        sibClassif = LinearDiscriminantAnalysis().fit(sib_df.dropna()[["ibd1", "ibd2"]].values, sib_df.dropna()["half"].values)
-
-    # classifier is supplied; use it
-    else:
-        sibClassif = classifier
-
-    # classify the NaN rows, which are putative FS
-    putFS = sib_df[sib_df["half"].isna()].copy()
-    putFS["half"] = sibClassif.predict(putFS[["ibd1", "ibd2"]].values)
-
-    # get a graph of all parentless FS pairs; makes it easier to find clusters of FS
-    FS = nx.Graph()
-    FS.add_weighted_edges_from(putFS[putFS.half=="FS"][["id1", "id2", "parents"]].values)
-
-    # make a copy of the pedigree obj
-    ped_copy = pedigree.copy()
-
-    # iterate through families of FS
-    for fam in nx.connected_components(FS):
-
-        # get the family subgraph
-        sub = FS.subgraph(fam)
-        # the set of the parents 
-        parents = set(it.chain(*[list(e["weight"]) for _,_,e in sub.edges(data=True)]))
-
-        # no parents; create both
-        if len(parents) == 0:
-            # parent names
-            father = f"dummy{dummy_n+1}"
-            mother = f"dummy{dummy_n+2}"
-            dummy_n += 2
-
-            # add the edges and the nodes attrs
-            ped_copy.add_edges_from([[i, j] for i,j in it.product([father, mother], list(fam))])
-            ped_copy.nodes[father]["sex"] = "1"; ped_copy.nodes[father]["age"] = np.nan
-            ped_copy.nodes[mother]["sex"] = "2"; ped_copy.nodes[mother]["age"] = np.nan
-
-        # one parent; create the other parent
-        elif len(parents) == 1:
-            # get the parent
-            parent1 = parents.pop()
-            # name the new parent
-            parent2 = f"dummy{dummy_n+1}"; dummy_n += 1
-
-            # get the sex of the parent and get the sex of the new parent
-            sex1 = pedigree.nodes[parent]["sex"]
-            sex2 = {"0": "0", "1": "2", "2": "1"}[sex1]
-
-            # add the edges and the node attrs of the new parent
-            ped_copy.add_edges_from([[i, j] for i,j in it.product([parent2], list(fam))])
-            ped_copy.nodes[parent2]["sex"] = sex2; ped_copy.nodes[parent2]["age"] = np.nan
-
-    return dummy_n, ped_copy
-
-def remove_missing(vcffile):
-
-    with open(vcffile) as file:
-
-        for lines in file:
-
-            if "#" in lines:
-                print(lines.strip())
-
-            else:
-                lines = lines.replace(".|.", "0|0")
-                lines = lines.replace(".|0", "0|0")
-                lines = lines.replace("0|.", "0|0")
-                lines = lines.replace(".|1", "1|1")
-                lines = lines.replace("1|.", "1|1")
-                print(lines.strip())
-                
-
-
-# p = PedigreeNetwork("Himba_allPO.fam")
-# p.get_paths()
-
-# p = PedSims("")
-# p.subset_vcf("plink_keep.txt", "../ponderosa/plink_data/Himba_shapeit.chr1.vcf")
-# if __name__ == "__main__":
-#     if sys.argv[-1] == "plink_unrelateds":
-#         r = RemoveRelateds()
-#         r.plink_unrelateds(sys.argv[-3], float(sys.argv[-2]))
-
-#     if sys.argv[-1] == "concat_rel":
-#         p = PedSims("")
-#         with concurrent.futures.ProcessPoolExecutor() as executor:
-#             results = [executor.submit(p.run_ibd_iteration, sys.argv[-4], sys.argv[-3], sys.argv[-2], chrom) for chrom in range(1, 23)]
-#             ibd_results = pd.concat([f.result() for f in concurrent.futures.as_completed(results)]).reset_index(drop=True)
-#         try:
-#             df = pd.read_feather("simulated_segments.f")
-#             df = pd.concat([df, ibd_results]).reset_index(drop=True)
-#         except:
-#             df = ibd_results
-
-#         df.to_feather("simulated_segments.f")
-
-#     if sys.argv[-1] == "missing":
-#         remove_missing(sys.argv[-2])
-
-#     if sys.argv[-1] == "pop_ibd":
-#         p = PedSims("")
-#         # map_file, rel, iter, pop, chrom
-#         map_file, rel, iter, pop, chrom = [sys.argv[i] for i in range(-6, -1)]
-
-#         # run ibd
-#         ibd_results = p.run_pop_ibd_iteration(map_file, rel, iter, pop, chrom)
-        
-#         ibd_results.reset_index(drop=True).to_csv(f"{pop}/{pop}_chr{chrom}_{rel}{iter}.txt", sep="\t", index=False)
-
-#     if sys.argv[-1] == "rename_pop_ibd":
-#         segment_file, pop, rel, sim_iter = [sys.argv[i] for i in range(-5, -1)]
-
-#         p = PedSims("")
-#         p.rename_ibd_segments(segment_file, pop, rel, sim_iter)
-
-#     if sys.argv[-1] == "interpolate":
-#         interpolate_map(sys.argv[-3], sys.argv[-2])
-#     if sys.argv[-1] == "subset_vcf":
-#         p = PedSims("")
-#         p.subset_vcf(sys.argv[-3], sys.argv[-2])
-        
-def parse_args():
-    parser = argparse.ArgumentParser()
-
-    # args for interpolation
-    parser.add_argument("-interpolate", action="store_true")
-    parser.add_argument("-genetic_map", type=str)
-    parser.add_argument("-input_map", type=str)
-    parser.add_argument("-columns", nargs='+', default=[0, 2, 3], type=int)
-    parser.add_argument("-sites", type=str, default="")
-
-    # args for running phasedibd
-    parser.add_argument("-phasedibd", action="store_true")
-    parser.add_argument("-input_vcf", type=str)
-    parser.add_argument("-output", type=str)
-
-    args = parser.parse_args()
-    return args
-
-
-if __name__ == "__main__":
-
-    args = parse_args()
-
-
-    if args.interpolate:
-        interpolate_map(in_map=args.input_map, map_file=args.genetic_map, columns=args.columns, sites=args.sites)
-
-    if args.phasedibd:
-        run_phasedibd(input_vcf=args.input_vcf, input_map=args.input_map, output=args.output)
+'''

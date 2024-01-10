@@ -87,7 +87,7 @@ class SampleData:
             map_df = pd.concat([pd.read_csv(filen, delim_whitespace=True, header=None) for filen in map_files])
 
             genome_len = 0
-            for chrom, chrom_df in map_df.groupby([0]):
+            for _, chrom_df in map_df.groupby([0]):
                 genome_len += (chrom_df.iloc[-1][2] - chrom_df.iloc[0][2])
         # no map files provided, use default genome length
         else:
@@ -99,6 +99,7 @@ class SampleData:
 
         ### load the king file
         king_file = kwargs.get("king_file", "")
+        mz_twins = set()
         if os.path.exists(king_file):
             master_hier = PedigreeHierarchy("tree_codes.yaml")
 
