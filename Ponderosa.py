@@ -225,7 +225,7 @@ class SampleData:
 
     
     def to_dataframe(self, edges, include_edges):
-        if len(edges) == 0:
+        if len(edges)==0 and include_edges==False:
             return nx.to_pandas_edgelist(self.g, source="id1", target="id2")
         # make copy of the graph
         tmp = self.g.copy()
@@ -264,6 +264,7 @@ class Classifiers:
                                    np.array(degree_train["degree"].values.tolist())]
         
         ### Train the hap classifier
+        import pdb; pdb.set_trace()
         hap_train = pairs.get_pair_df_from(["HS", "GPAV"]).dropna(subset=["h"])
 
         # get the phase error classifier
@@ -529,7 +530,7 @@ def parse_args():
     parser.add_argument("--population", help="Population name to run Ponderosa on.", default="pop1")
     parser.add_argument("--assess", help="For assessing the performance of Ponderosa.", action="store_true")
 
-    parser.add_argument("-training", help = "Path and name of the 'degree' pkl file for training.", default="")
+    parser.add_argument("--training", help = "Path and name of the 'degree' pkl file for training.", default="")
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
     return args

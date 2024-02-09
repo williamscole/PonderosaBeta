@@ -955,6 +955,7 @@ class Pedigree:
         
         # all pairs of individuals who share the same parent 
         sib_pairs = set(it.chain(*[[tuple(sorted([id1, id2])) for id1, id2 in it.combinations(self.po.successors(node), r=2)] for node in self.po.nodes]))
+        sib_pairs |= {tuple(sorted([id1, id2])) for id1, id2 in self.samples.get_edges(lambda x: x["k_degree"]=="FS")}
 
         # get the data frame of the sib pairs
         sib_df = self.samples.to_dataframe(sib_pairs, include_edges=True)
