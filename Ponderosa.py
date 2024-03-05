@@ -24,6 +24,21 @@ def get_file_names(file_name):
     else:
         return [file_name]
     
+def load_fam(fam_file):
+    ### load the fam file
+    fam = pd.read_csv(fam_file, delim_whitespace=True, dtype=str, header=None)
+
+    ### get new dataframe of the parents and fathers
+    tmp_df_list = []
+    for sex, col in zip(["1", "2"], [2, 3]):
+        tmp = fam[fam[col]!="0"][[0, col]]
+        tmp[4] = sex; tmp[5] = "-9"; tmp[1] = tmp[col]
+        tmp_df_list.append(tmp[[0, 1, 4, 5]])
+
+    parent_df = pd.concat(tmp_df_list)
+
+    return pd.concat([fam, parent_df]).drop_duplicates(1, keep="first").fillna("0").reset_index(drop=True)
+    
 
 
 ''' SampleData is a class that holds a networkx graph where nodes are individuals
@@ -35,7 +50,7 @@ class SampleData:
     def __init__(self, fam_file, **kwargs):
 
         ### load the fam file
-        fam = pd.read_csv(fam_file, delim_whitespace=True, dtype=str, header=None)
+        fam = load_fam(fam_file)
 
         ### the default information for adding a person
         self.default = {"sex": 0, "mother": -1, "father": -1, "children": [], "age": np.nan, "popl": "pop1"}
@@ -264,7 +279,6 @@ class Classifiers:
                                    np.array(degree_train["degree"].values.tolist())]
         
         ### Train the hap classifier
-        import pdb; pdb.set_trace()
         hap_train = pairs.get_pair_df_from(["HS", "GPAV"]).dropna(subset=["h"])
 
         # get the phase error classifier
@@ -475,6 +489,7 @@ def PONDEROSA(samples, **kwargs):
         second = unknown_df[unknown_df["probs"].apply(lambda x: x.hier.nodes["2nd"]["p_con"] > 0.2)]
 
 
+
     # get the n_ibd segs classifier probabilities
     probs, labels = training.predict_proba("n", second[["ibd_cov", "n"]].values)
     # add the probabilities to the tree
@@ -507,7 +522,8 @@ def PONDEROSA(samples, **kwargs):
     relatives_obj.set_min_probability(kwargs.get("min_p", 0.5))
     relatives_obj.write_readable(f"{kwargs.get('output', 'output')}.txt")
     if not kwargs.get("assess", False):
-        relatives_obj.subset_samples(lambda x: x.probs.hier.nodes["2nd"]["p"] > 0.5)
+        # fix this
+        relatives_obj.subset_samples(lambda x: x.probs.hier.nodes["relatives"]["p"] == 1)
     relatives_obj.pickle_it(f"{kwargs.get('output', 'output')}_results.pkl")
 
 def parse_args():
