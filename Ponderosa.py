@@ -11,7 +11,7 @@ from sklearn.model_selection import LeaveOneOut
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 from copy import deepcopy
 
-from pedigree_tools import ProcessSegments, Pedigree, PedigreeHierarchy, introduce_phase_error
+from pedigree_tools import ProcessSegments, Pedigree, PedigreeHierarchy, introduce_phase_error, Classifier
 
 ''' Ponderosa can take as input a file (e.g., containing IBD segments) that has all chromosomes
 represented, in which case it does not expect chr1 to be in the file name. Otherwise, if the files
@@ -107,7 +107,8 @@ class SampleData:
         # no map files provided, use default genome length
         else:
             print("No map files have been provided. Assuming genome length of 3545 cM.")
-            genome_len = 3545
+            # DELETE
+            genome_len = 3542.241486670362#3545
                 # store the genome_len
 
         self.genome_len = genome_len
@@ -268,7 +269,6 @@ class SampleData:
 
 class Classifiers:
     def __init__(self, pairs):
-
         # store the training data for each classifier; purpose is to allow leave one out training
         self.training = {}
 
@@ -365,13 +365,74 @@ class Classifiers:
         pkl.dump(lda, i)
         i.close()
 
+### converts the LDA loaded from the sims to the Classifier class. This is a TODO!!!!
+def convert2Classifier(lda, name):
+    classif = Classifier(None, None, None, name, lda)
+
+
+
+
+def trainClassifiers(pairs, training):
+
+    if os.path.exists(training):
+        out_classf = []
+        for classf_name in ["degree", "hap", "nsegs"]:
+            i = open(training.replace("degree", classf_name), "rb")
+            lda = pkl.load(i)
+            name = {"nsegs": "no. of segments", "hap": "haplotype"}.get(classf_name, classf_name)
+            out_classf.append(Classifier(None, None, None, name, lda))
+        return out_classf
+
+    degree_train = pairs.get_pair_df("relatives").dropna(subset=["k_ibd1"])
+
+    ### Train the degree classifier
+    degree_classif = Classifier(X=degree_train[["k_ibd1", "k_ibd2"]].values,
+                                y=degree_train["degree"].values,
+                                ids=degree_train["pair"].values,
+                                name="degree")
+    
+    ### Train the hap classifier
+    hap_train = pairs.get_pair_df_from(["HS", "GPAV"]).dropna(subset=["h"])
+
+    # get the phase error classifier
+    X_train = hap_train.apply(lambda x: [x.h_error[x.pair[0]], x.h_error[x.pair[1]]], axis=1).values.tolist()
+    y_train = ["Phase error" for _ in X_train]
+
+    # now add the actual haplotype scores
+    X_train += hap_train.apply(lambda x: [x.h[x.pair[0]], x.h[x.pair[1]]], axis=1).values.tolist()
+    y_train += hap_train["requested"].values.tolist()
+
+    hap_classif = Classifier(X=np.array(X_train),
+                             y=np.array(y_train),
+                             ids=[("0","0") for _ in range(hap_train.shape[0])] + hap_train["pair"].values.tolist(),
+                             name="haplotype")
+    
+    ### Train the nsegs classifier
+    n_train = pairs.get_pair_df_from(["MGP", "MHS", "PHS", "PGP", "AV"]).dropna(subset=["n"])
+    # also train on the kinship coefficient
+    n_train["ibd_cov"] = n_train.apply(lambda x: x.k_ibd2 + x.k_ibd1, axis=1)
+
+    n_classif = Classifier(X=n_train[["ibd_cov", "n"]].values,
+                           y=n_train["requested"].values,
+                           ids=n_train["pair"].values,
+                           name="no. of segments")
+    
+    return degree_classif, hap_classif, n_classif
+
+
+
 
 class ResultsData:
-    def __init__(self, samples, pairs, df=pd.DataFrame()):
+    def __init__(self, samples, pairs, classifiers, df=pd.DataFrame()):
 
         self.samples = samples
         self.pairs = pairs
         self.df = self.samples.to_dataframe([], include_edges=False) if df.shape[0]==0 else df
+        self.classifiers = classifiers
+
+
+    def get_classifier(self, name):
+        return self.classifiers[{"degree_class":0, "segments_class":1, "hap_class":2}[name]]
 
     # writes out a human readable output; can specificy the columns
     def write_readable(self, output, **kwargs):
@@ -432,69 +493,109 @@ class ResultsData:
         pkl.dump(self, i)
         i.close()
 
-    def most_likely_among(self, nodes, update_attrs=False):
-        likely_among = self.df["probs"].apply(lambda x: nodes[np.argmax([x.hier.nodes[node]["p"] for node in nodes])]).values
+    def most_likely_among(self, df, nodes, update_attrs=False):
+        if df.shape[0]==0:
+            df = self.df
+
+        likely_among = df["probs"].apply(lambda x: nodes[np.argmax([x.hier.nodes[node]["p"] for node in nodes])]).values
 
         if update_attrs:
             self.samples.update_edges(zip(self.df[["id1","id2"]].values, likely_among), "likely_among")
 
         else:
             return likely_among
+        
+    def get_evaluation_df(self, relationship_nodes):
+        # get the df of pairs and their true relationship
+        df = self.pairs.get_pair_df_from(relationship_nodes)[["pair", "requested"]].rename({"requested": "true"}, axis=1)
+
+        tmp_df = self.to_dataframe(df["pair"].values, include_edges=True)
+        tmp_df["predicted"] = self.most_likely_among(tmp_df, relationship_nodes)
+
+        return df.merge(tmp_df[["pair", "predicted"]], on="pair")
+
+        return df
 
 
 
-def PONDEROSA(samples, **kwargs):
+
+class Args:
+    # init with the default arguments
+    def __init__(self, **kwargs):
+        self.ages = ""
+        self.map = ""
+        self.populations = ""
+        self.yaml = ""
+        self.pedigree_codes = "pedigree_codes.yaml"
+        self.output = "Ponderosa"
+        self.min_p = 0.50
+        self.population = "pop1"
+        self.training = ""
+        self.interactive = False
+
+        self.update(kwargs)
+
+    def update(self, arg_dict):
+        for arg, val in arg_dict.items():
+            setattr(self, arg, val)
+
+    # update the arguments with kwargs
+    def update_args(self, return_self, **kwargs):
+        self.update(kwargs)
+
+        if return_self:
+            return self
+        
+    # given a yaml file with args and their vals, update the args
+    def add_yaml_args(self, return_self, yaml):
+        i = open(yaml)
+        yaml_dict = yaml.safe_load(i)
+        self.update(yaml_dict)
+
+        if return_self:
+            return self
+
+    # add args from the command line
+    def add_cli_args(self, return_self, args):
+        self.update(vars(args))
+
+        # yaml file exists, override any cur args
+        if os.path.exists(self.yaml):
+            self.add_yaml_args(self.yaml)
+
+        if return_self:
+            return self
+            
+def PONDEROSA(samples, args=Args()):
 
     pedigree = Pedigree(samples=samples, pedigree_file="pedigree_codes.yaml", tree_file="tree_codes.yaml")
-    pedigree.find_all_relationships()
+    pairs = pedigree.find_all_relationships()
 
-    pairs = pedigree.hier
+    # trains the classifiers
+    degree_classif, hap_classif, n_classif = trainClassifiers(pairs, args.training)
 
-    training = Classifiers(pairs)
-
-    if kwargs.get("assess", False):
-
-        unknown_df = samples.to_dataframe(pairs.get_pairs("relatives"), include_edges=True).dropna(subset=["k_prop"])
-
-    else:
-
-        # get all close relatives to exclude
-        found_close = list(pairs.get_nodes_from(["2nd", "PO", "FS"]))
-
-        # make a dataframe of all pairs that are not close relatives
-        unknown_df = samples.to_dataframe(found_close, include_edges=False)
-
-    unknown_df = unknown_df.reset_index()
-
-
+    # get data frame of the unknown 
+    unknown_df = samples.to_dataframe([], include_edges=False)
+    unknown_df = unknown_df[unknown_df.k_degree!="UN"].reset_index(drop=True)
     unknown_df["ibd_cov"] = unknown_df.apply(lambda x: x.ibd1 + x.ibd2, axis=1)
 
-    # predict the degree of relatedness
-    # unknown_df["predicted_degree"] = training.predict("degree", unknown_df[["k_ibd1", "k_ibd2"]].values)
-
-
     # get the degree probabilities
-    probs, labels = training.predict_proba("degree", unknown_df[["k_ibd1", "k_ibd2"]].values)
+    probs, labels = degree_classif.predict_proba(X=unknown_df[["k_ibd1", "k_ibd2"]].values,
+                                                ids=unknown_df[["id1", "id2"]].values)
 
     # add the probabilities to the tree
     for (_, row), prob in zip(unknown_df.iterrows(), probs):
-        row["probs"].add_probs(list(zip(next(labels), prob)), "ibd")
+        row["probs"].add_probs(list(zip(labels, prob)), "ibd")
 
-    if kwargs.get("assess", False):
-
-        second_pairs = samples.to_dataframe(pairs.get_pairs("2nd"), include_edges=True)[["id1", "id2"]]
-        second = unknown_df.merge(second_pairs, on=["id1", "id2"], how="inner")
-
-    else:
-        second = unknown_df[unknown_df["probs"].apply(lambda x: x.hier.nodes["2nd"]["p_con"] > 0.2)]
-
-
+    # subset to second degree relatives
+    second_df = unknown_df[unknown_df["probs"].apply(lambda x: x.hier.nodes["2nd"]["p_con"] > 0.2)]
 
     # get the n_ibd segs classifier probabilities
-    probs, labels = training.predict_proba("n", second[["ibd_cov", "n"]].values)
+    probs, labels = n_classif.predict_proba(X=second_df[["ibd_cov", "n"]].values,
+                                            ids=second_df[["id1", "id2"]].values)
     # add the probabilities to the tree
-    for (_, row), prob in zip(second.iterrows(), probs):
-        row["probs"].add_probs(list(zip(next(labels), prob)), "nsegs")
+    for (_, row), prob in zip(second_df.iterrows(), probs):
+        row["probs"].add_probs(list(zip(labels, prob)), "nsegs")
 
         # for each of these nodes, take the sum of the two children
         for node in ["GP", "GPAV", "HS"]:
@@ -505,50 +606,67 @@ def PONDEROSA(samples, **kwargs):
 
 
     # get the probabilities from the hap score classifier
-    probs, labels = training.predict_proba("hap", second.apply(lambda x: sorted([h for _,h in x.h.items()], reverse=True), axis=1).values.tolist())
-    
-    for (_, row), prob in zip(second.iterrows(), probs):
+    probs, labels = hap_classif.predict_proba(X=np.array(second_df.apply(lambda x: sorted([h for _,h in x.h.items()], reverse=True), axis=1).values.tolist()),
+                                                ids=second_df[["id1", "id2"]].values)
+
+    for (_, row), prob in zip(second_df.iterrows(), probs):
         # get the index of the Phase error class
-        classes = list(next(labels))
+        classes = list(labels)
         pe_index = classes.index("Phase error"); del classes[pe_index]
+
         # the chance of high Phase error is high; do not update the HS or GPAV probabilities
         if prob[pe_index] < 0.2:
             row["probs"].add_probs(list(zip(classes, np.delete(prob, pe_index))), "hap")
 
+    # merge the second degree back in with the unknowns
+    unknown_df = pd.concat([unknown_df, second_df]).drop_duplicates(subset=["id1", "id2"], keep="last").reset_index(drop=True)
+
     samples.edge_subset(unknown_df[["id1", "id2"]].apply(lambda x: tuple(x), axis=1).values, inplace=True)
 
-    relatives_obj = ResultsData(samples=samples, pairs=pairs, df=unknown_df)
+    relatives_obj = ResultsData(samples=samples,
+                                pairs=pairs,
+                                classifiers=[degree_classif, hap_classif, n_classif],
+                                df=unknown_df)
     relatives_obj.compute_probs()
-    relatives_obj.set_min_probability(kwargs.get("min_p", 0.5))
-    relatives_obj.write_readable(f"{kwargs.get('output', 'output')}.txt")
-    if not kwargs.get("assess", False):
-        # fix this
-        relatives_obj.subset_samples(lambda x: x.probs.hier.nodes["relatives"]["p"] == 1)
-    relatives_obj.pickle_it(f"{kwargs.get('output', 'output')}_results.pkl")
+    relatives_obj.set_min_probability(args.min_p)
+
+    if args.interactive:
+        return relatives_obj
+    
+    relatives_obj.write_readable(f"{args.output}.txt")
+
+    # relatives_obj.subset_samples(lambda x: x.probs.hier.nodes["relatives"]["p"] == 1)
+    relatives_obj.pickle_it(f"{args.output}_results.pkl")
 
 def parse_args():
     parser = argparse.ArgumentParser()
+
+    # get the default args
+    args = Args()
+
     # Required file arguments
     parser.add_argument("--ibd", help = "IBD segment file. If multiple files for each chromosome, this is the path for chromosome 1.")
     parser.add_argument("--fam", help="PLINK-formated .fam file")
     parser.add_argument("--king", help="KING .seg file.")
 
     # Optional file arguments
-    parser.add_argument("--ages", help="Age file. First column is the IID, second column is the age", default="")
-    parser.add_argument("--map", help = "PLINK-formatted .map file.", default="")
-    parser.add_argument("--populations", help="Path and file name of .txt file where col1 is the IID and col2 is their population.", default="")
-    parser.add_argument("--yaml", help="YAML file containing all arguments (optional). Can be combined with CLI arguments.", default="")
-    parser.add_argument("--pedigree_codes", default="pedigree_codes.yaml")
+    parser.add_argument("--ages", help="Age file. First column is the IID, second column is the age", default=args.ages)
+    parser.add_argument("--map", help = "PLINK-formatted .map file.", default=args.ages)
+    parser.add_argument("--populations", help="Path and file name of .txt file where col1 is the IID and col2 is their population.", default=args.populations)
+    parser.add_argument("--yaml", help="YAML file containing all arguments (optional). Can be combined with CLI arguments.", default=args.yaml)
+    parser.add_argument("--pedigree_codes", default=args.pedigree_codes)
     
     # Other arguments
     parser.add_argument("--output", help = "Output prefix.", default="Ponderosa")
-    parser.add_argument("--min_p", help="Minimum posterior probability to output the relationship.", default=0.50, type=float)
-    parser.add_argument("--population", help="Population name to run Ponderosa on.", default="pop1")
+    parser.add_argument("--min_p", help="Minimum posterior probability to output the relationship.", default=args.min_p, type=float)
+    parser.add_argument("--population", help="Population name to run Ponderosa on.", default=args.population)
     parser.add_argument("--assess", help="For assessing the performance of Ponderosa.", action="store_true")
 
-    parser.add_argument("--training", help = "Path and name of the 'degree' pkl file for training.", default="")
+    parser.add_argument("--training", help = "Path and name of the 'degree' pkl file for training.", default=args.training)
     parser.add_argument("--debug", action="store_true")
-    args = parser.parse_args()
+
+    args.add_cli_args(return_self=False, args=parser.parse_args())
+    
     return args
 
 '''

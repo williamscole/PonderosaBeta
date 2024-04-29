@@ -12,7 +12,7 @@ import logging
 from copy import deepcopy
 from sklearn.model_selection import LeaveOneOut
 
-from Ponderosa import SampleData
+from Ponderosa import *
 from pedigree_tools import PedigreeHierarchy, Pedigree
 
 
@@ -526,7 +526,14 @@ def PONDEROSA(**kwargs):
     # import pdb; pdb.set_trace()
 
 if __name__ == "__main__":
-    PONDEROSA(assess=False)
+    # PONDEROSA(assess=False)
+    # i = open("for_dev/Ponderosa_results.pkl", "rb")
+    # obj = pkl.load(i)
+    # import pdb; pdb.set_trace()
+
+    df = pd.read_csv("for_dev/Ponderosa.txt", delim_whitespace=True)
+    sns.scatterplot(data=df, x="k_ibd1", y="k_ibd2", hue="degree")
+    plt.savefig("for_dev/Ponderosa_Himba.png")
 
 
 # print(Ped.hier.get_pair_df_from(["GPAV", "HS"]).dropna(subset="h"))

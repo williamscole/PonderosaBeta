@@ -23,6 +23,7 @@ import subprocess
 from matplotlib import colors
 from networkx.drawing.nx_agraph import graphviz_layout
 import matplotlib as mpl
+import heapq
 
 
 def split_regions(region_dict, new_region):
@@ -533,12 +534,8 @@ class PedigreeHierarchy:
     
     def top2(self, nodes):
         ps = [self.hier.nodes[node]["p"] for node in nodes]
-        top1 = np.argmax(ps)
-        top = [nodes[top1]]
-        del nodes[top1]
-        ps = [self.hier.nodes[node]["p"] for node in nodes]
-        return top + [nodes[np.argmax(ps)]]
-
+        return [j for _,j in heapq.nlargest(2, zip(ps, nodes))]
+    
     # starting at the root, traverses the path of most probable relationships until it reaches a probability below min_p
     def most_probable(self, min_p):
 
@@ -800,6 +797,99 @@ class RelationshipCodes:
         # relationship is not found
         return "nan" if found else "unknown", ibd1, ibd2, mat, same_gen
     
+class Classifier:
+    def __init__(self, X, y, ids, name, lda=None):
+        # supplied the lda directly
+        if lda != None:
+            self.lda = lda
+            self.X = lda.means_
+            self.y = lda.classes_
+            self.train_ids = np.arange(len(self.y)).astype(str)
+            self.name = name
+
+        else:
+            self.train_ids = np.array(["_".join(sorted([i,j])) for i,j in ids])
+
+            # Check that there are enough training pairs
+            for lab, count in Counter(y).items():
+                # if only 1, must remove from the training
+                if count == 1:
+                    print(f"Only 1 {lab} found. Removing from training set.")
+                    self.train_ids = self.train_ids[np.where(y!=lab)]
+                    X = X[np.where(y!=lab)[0],:]
+                    y = y[np.where(y!=lab)]
+                elif count < 5:
+                    print(f"Only {count} {lab} found. Retaining in dataset.")
+
+            self.lda = LinearDiscriminantAnalysis().fit(X, y)
+            self.X = X; self.y = y
+            self.name = name
+
+    def loo(self, ids):
+        proba_arr = []
+
+        # iterate through the training pairs
+        for id1 in ids:
+            lda = LinearDiscriminantAnalysis().fit(self.X[np.where(self.train_ids!=id1)[0],:],
+                                                    self.y[np.where(self.train_ids!=id1)[0]])
+            # get proba
+            proba = lda.predict_proba(self.X[np.where(self.train_ids==id1)[0]])
+            proba_arr.append(list(proba[0]))
+        
+        return np.array(proba_arr)
+    
+    def train_label(self, id1, id2):
+        str_id = "_".join(sorted([id1, id2]))
+        if str_id in self.train_ids:
+            return self.y[np.where(self.train_ids==str_id)[0][0]]
+        return "NA"
+
+    '''Takes as input an nxm matrix X (n is number of samples, m is number of features)
+    and an array of length n, ids. Returns a nxp matrix (p is the number of classes)
+    and an array of length p that contains the classes which correspond to the probabilities in each output row'''
+    def predict_proba(self, X, ids):
+        # make sure the ids are ordered
+        ids = np.array(["_".join(sorted([i,j])) for i,j in ids])
+
+        # index of the training data versus the test data
+        train_idx = np.where(np.in1d(ids, self.train_ids))[0]
+        test_idx = np.where(~np.in1d(ids, self.train_ids))[0]
+
+        # the list of probs to concatenate
+        to_concat = []
+
+        # testing pairs are included
+        if len(test_idx) > 0:
+            test_proba = self.lda.predict_proba(X[test_idx, :])
+            to_concat.append(test_proba)
+
+        # training pairs to be assessed are included
+        if len(train_idx) > 0:
+            print(f"Trained {self.name} classifier ({len(train_idx)} samples).")
+            t1 = time.time()
+            # and the leave-one-out probabilities
+            train_proba = self.loo(ids[train_idx])
+            to_concat.append(train_proba)
+            print(f"\tPerformed leave-one-out x-validation for {len(train_idx)} samples ({round(time.time()-t1, 2)} seconds).")
+
+        # must concat the two
+        if len(to_concat) > 1:
+            proba = np.concatenate(to_concat)
+        
+        else:
+            proba = to_concat[0]
+        
+        proba = proba[np.where(ids[np.concatenate((test_idx, train_idx))]==ids[:, np.newaxis])[1], :]
+        
+        return proba, self.lda.classes_
+    
+    '''See predict_proba for the input. Returns the most likely relationship'''
+    def predict(self, X, ids):
+        proba, classes = self.predict_proba(X, ids)
+
+        return np.array([classes[np.argmax(prob)] for prob in proba])
+
+
 
 class Pedigree:
     def __init__(self, **kwargs):
@@ -944,7 +1034,7 @@ class Pedigree:
             new_nodes = []
             n_parents_to_add = new_parents.pop()
             if n_parents_to_add == 1:
-                sex = self.po.nodes[next(self.po.predecessors("HMB156"))]["sex"]
+                sex = self.po.nodes[next(self.po.predecessors(next(iter(fam))))]["sex"]
                 new_nodes += [[f"Missing{self.n}", node, {"1": "2", "2": "1"}[sex]] for node in fam]
                 self.n += 1
             elif n_parents_to_add == 2:
@@ -1000,6 +1090,8 @@ class Pedigree:
         for unkr, n in Counter(unknown_rels).items():
             self.logger.info(f"{n} of the following were found:")
             self.logger.info(unkr + "\n")
+
+        return self.hier
 
     
 class TrainPonderosa:
