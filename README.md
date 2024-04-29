@@ -61,6 +61,7 @@ The following arguments are accepted:
 - `--min_p`: Minimum probability required for the relationship output. E.g., if P(2nd)=0.98 and P(MHS)=0.93, setting `min_p=0.95` would report the pair as `2nd`, but `min_p=0.9` would report the pair as `MHS`. *Default 0.50*
 - `--population`: Used with `--populations`, specifies the population to run PONDEROSA on.
 - `--assess`: For assessing the performance of Ponderosa on the known pairs.
+- `--training`: Full path and file name to the degree classifier. Assumes that the the haplotype score classifier (hap) and number of IBD segments classifier (nsegs) have the same prefix/suffix.  
 
 ### Plotting IBD segments
 
