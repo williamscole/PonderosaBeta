@@ -209,10 +209,10 @@ class ProcessSegments:
         for start, stop in segment_list:
 
             '''Alg works by adding start/stop positions to overlapped
-               We init overlapped with the start/stop of the segment
-               Next we iterate through the current regions
-               If there is overlap, we add the start/stop to overlapped
-               At the end, we create a new region taking the min of overlapped and the max of overlapped'''
+                We init overlapped with the start/stop of the segment
+                Next we iterate through the current regions
+                If there is overlap, we add the start/stop to overlapped
+                At the end, we create a new region taking the min of overlapped and the max of overlapped'''
             overlapped = {start, stop}
 
             # we rewrite the regions

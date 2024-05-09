@@ -11,7 +11,7 @@ from sklearn.model_selection import LeaveOneOut
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 from copy import deepcopy
 
-from pedigree_tools import ProcessSegments, Pedigree, PedigreeHierarchy, introduce_phase_error, Classifier
+from pedigree_tools import ProcessSegments, Pedigree, PedigreeHierarchy, introduce_phase_error, Classifier, RemoveRelateds
 
 ''' Ponderosa can take as input a file (e.g., containing IBD segments) that has all chromosomes
 represented, in which case it does not expect chr1 to be in the file name. Otherwise, if the files
@@ -513,8 +513,44 @@ class ResultsData:
         tmp_df["predicted"] = self.most_likely_among(tmp_df, relationship_nodes)
 
         return df.merge(tmp_df[["pair", "predicted"]], on="pair")
+    
+    '''
+    1. Mode 1: float
+    2. Mode 2: degree of relatedness
+    '''
+    def get_unrelated_set(self, mode: str, use_king: bool, max_r, king_file, **kwargs):
+        if mode not in ["float", "degree"]:
+            raise ValueError("Only 'float' and 'degree' modes are allowed!")
+        if mode == "float" and type(max_r) != float:
+            raise TypeError("float mode specified: max_r must be a float!")
+        if mode == "degree" and type(max_r) != str:
+            raise TypeError("degree mode specified: max_r must be a string!")
+        
+        G = nx.Graph()
+        G.add_weighted_edges_from(pd.read_csv(king_file, delim_whitespace=True).apply(lambda x: [x.ID1, x.ID2, {"IBD1":x.IBD1Seg, "IBD2":x.IBD2Seg, "k":x.PropIBD, "degree":x.InfType}], axis=1).values)
+        
+        if mode == "float":
+            edges = [(i,j,d["k"]) for i,j,d in G.edges(data=True) if d["k"]>max_r]
 
-        return df
+        elif mode == "degree":
+            deg_order = ["UN", "4th", "4th+", "3rd", "3rd+", "2nd", "2nd+", "PO", "FS", "1st"]
+            related_deg = deg_order[deg_order.index(max_r)+1:]
+
+            if use_king:
+                edges = [(i,j,d["k"]) for i,j,d in G.edges(data=True) if d["degree"] in related_deg]
+
+            else:
+                degree_lda = self.get_classifier("degree_class")
+                edges = [(i,j,d["k"]) for i,j,d in G.edges(data=True) if degree_lda.predict([[d["IBD1", d["IBD2"]]]])[0] in related_deg]
+
+        g = nx.Graph()
+        g.add_weighted_edges_from(edges)
+
+        RR = RemoveRelateds()
+        RR.get_unrelated_set(g, lambda x: True, "k", kwargs.get("",))
+         
+        
+
 
 
 
@@ -547,8 +583,8 @@ class Args:
             return self
         
     # given a yaml file with args and their vals, update the args
-    def add_yaml_args(self, return_self, yaml):
-        i = open(yaml)
+    def add_yaml_args(self, return_self, yamlf):
+        i = open(yamlf)
         yaml_dict = yaml.safe_load(i)
         self.update(yaml_dict)
 
@@ -561,7 +597,7 @@ class Args:
 
         # yaml file exists, override any cur args
         if os.path.exists(self.yaml):
-            self.add_yaml_args(self.yaml)
+            self.add_yaml_args(return_self, self.yaml)
 
         if return_self:
             return self
