@@ -799,6 +799,15 @@ class RelationshipCodes:
     
 class Classifier:
     def __init__(self, X, y, ids, name, lda=None):
+        def equal_sample_size(X, y, count):
+            out_X, out_y = [], []
+            for lab in set(y):
+                lab_index = np.where(y==lab)[0]
+                X_to_keep = np.random.choice(lab_index, count, replace=False)
+                out_X.append(X[X_to_keep,:])
+                out_y += [lab]*count
+            return np.concatenate(out_X), np.array(out_y)
+        
         # supplied the lda directly
         if lda != None:
             self.lda = lda
@@ -811,7 +820,9 @@ class Classifier:
             self.train_ids = np.array(["_".join(sorted([i,j])) for i,j in ids])
 
             # Check that there are enough training pairs
+            min_count = np.inf
             for lab, count in Counter(y).items():
+                min_count = count if count < min_count else min_count
                 # if only 1, must remove from the training
                 if count == 1:
                     print(f"Only 1 {lab} found. Removing from training set.")
@@ -820,6 +831,8 @@ class Classifier:
                     y = y[np.where(y!=lab)]
                 elif count < 5:
                     print(f"Only {count} {lab} found. Retaining in dataset.")
+
+            X, y = equal_sample_size(X, y, min_count)
 
             self.lda = LinearDiscriminantAnalysis().fit(X, y)
             self.X = X; self.y = y
