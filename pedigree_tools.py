@@ -1397,9 +1397,14 @@ def run_phasedibd(input_vcf, input_map, **kwargs):
 
     haps = ibd.VcfHaplotypeAlignment(input_vcf, input_map)
     tpbwt = ibd.TPBWTAnalysis()
+    
+    phase_corr_mode=kwargs.get("use_phase_correction", False)  # SDS edited
+    
     ibd_results = tpbwt.compute_ibd(haps, 
-                                    use_phase_correction=kwargs.get("use_phase_correction", False),
+                                    use_phase_correction=phase_corr_mode,  # SDS edited
                                     L_f=kwargs.get("L_f", 3.0))
+    
+    print("Phase correction mode: " + str(phase_corr_mode))  # SDS added
     
     # get a list of the samples in the vcf
     with open(input_vcf) as vcf:
@@ -1816,6 +1821,7 @@ def parse_args():
     parser.add_argument("-phasedibd", action="store_true")
     parser.add_argument("-input_vcf", type=str)
     parser.add_argument("-output", type=str)
+    parser.add_argument("-use_phase_correction", action="store_true")  # SDS added
 
     args = parser.parse_args()
     return args
@@ -1830,7 +1836,10 @@ if __name__ == "__main__":
         interpolate_map(input_map=args.input_map, map_file=args.genetic_map, columns=args.columns, sites=args.sites)
 
     if args.phasedibd:
-        run_phasedibd(input_vcf=args.input_vcf, input_map=args.input_map, output=args.output)
+        run_phasedibd(input_vcf=args.input_vcf,
+                      input_map=args.input_map,
+                      output=args.output,
+                      use_phase_correction=args.use_phase_correction)  # SDS added
 
 
 '''
