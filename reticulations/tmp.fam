@@ -1,8 +1,0 @@
-conAV1 conAV1_g1-b1-s1 0 0 1 -9
-conAV1 conAV1_g1-b1-i1 0 0 2 -9
-conAV1 conAV1_g2-b1-s1 0 0 1 -9
-conAV1 conAV1_g2-b1-i1 conAV1_g1-b1-s1 conAV1_g1-b1-i1 2 -9
-conAV1 conAV1_g2-b2-i1 conAV1_g1-b1-s1 conAV1_g1-b1-i1 2 -9
-conAV1 conAV1_g3-b1-i1 conAV1_g2-b1-s1 conAV1_g2-b1-i1 1 -9
-conAV1 conAV1_g4-b1-i1 conAV1_g3-b1-i1 conAV1_g2-b2-i1 1 1
-(/users/cwilli50/anaconda/snakemake) [cwilli50@node1321 Ped
