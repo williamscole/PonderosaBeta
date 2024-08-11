@@ -1452,7 +1452,7 @@ class RemoveRelateds:
                  noise=1.5,
                  target=np.inf,
                  max_iter=10,
-                 seed=np.random.choice(np.range(2000))):
+                 seed=np.random.choice(np.arange(2000))):
         """
         Initializes the object by creating the kinship graph
 
