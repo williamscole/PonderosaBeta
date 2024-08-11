@@ -749,9 +749,10 @@ if __name__ == "__main__":
             i.close()
 
     PONDEROSA(samples=samples,
-              min_p=args.min_p,
-              assess=args.assess,
-              output=args.output)
+              args=args)
+            #   min_p=args.min_p,
+            #   assess=args.assess,
+            #   output=args.output)
 
 
 '''
