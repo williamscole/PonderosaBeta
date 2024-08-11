@@ -1030,7 +1030,7 @@ class Pedigree:
     '''
     Finds sets of full-siblings and makes sure that they have the same parents
     '''
-    def resolve_sibships(self):
+    def resolve_sibships(self, lda=None):
         '''
         Takes as input a list of indviduals who are full-siblings
         If they all have both parents listed --> do nothing
@@ -1064,15 +1064,29 @@ class Pedigree:
         sib_df = self.samples.to_dataframe(sib_pairs, include_edges=True)
 
         # train gaussian mixture model
-        gmm = GaussianMixture(n_components=2,
-                              means_init=[[0.5, 0], [0.5, 0.25]],
-                              covariance_type="spherical").fit(sib_df[["k_ibd1", "k_ibd2"]].values.tolist())
+        if sib_df.shape[0] > 1:
+            gmm = GaussianMixture(n_components=2,
+                                means_init=[[0.5, 0], [0.5, 0.25]],
+                                covariance_type="spherical")
+            
+            gmm.fit(sib_df[["k_ibd1", "k_ibd2"]].values.tolist())
 
-        self.logger.info(f"\nTrained sibling GMM. Half-sibling means are ibd1={round(gmm.means_[0][0], 2)}, ibd2={round(gmm.means_[0][1], 2)}")
-        self.logger.info(f"Full-sibling means are ibd1={round(gmm.means_[1][0], 2)}, ibd2={round(gmm.means_[1][1], 2)}\n")
-        
-        # predict whether FS or HS
-        sib_df["predicted"] = gmm.predict(sib_df[["k_ibd1", "k_ibd2"]].values.tolist())
+            self.logger.info(f"\nTrained sibling GMM. Half-sibling means are ibd1={round(gmm.means_[0][0], 2)}, ibd2={round(gmm.means_[0][1], 2)}")
+            self.logger.info(f"Full-sibling means are ibd1={round(gmm.means_[1][0], 2)}, ibd2={round(gmm.means_[1][1], 2)}\n")
+
+            # predict whether FS or HS
+            sib_df["predicted"] = gmm.predict(sib_df[["k_ibd1", "k_ibd2"]].values.tolist())
+
+        elif lda:
+            i = open(lda, "rb")
+            lda = pkl.load(i)
+            import pdb; pdb.set_trace()
+
+        else:
+            print("Not enough putative FS/half-siblings. Please supply a training pickle file!")
+
+
+    
 
         # the label 1 corresponds to full-siblings
         fs_g = nx.Graph()
@@ -1092,9 +1106,9 @@ class Pedigree:
         self.po = tmp
 
     # finds all relationships for nodes in the graph
-    def find_all_relationships(self):
+    def find_all_relationships(self, training=None):
 
-        self.resolve_sibships()
+        self.resolve_sibships(training)
 
         unknown_rels = it.chain(*[self.focal_relationships(focal) for focal in self.po.nodes])
 

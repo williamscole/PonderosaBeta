@@ -605,7 +605,7 @@ class Args:
 def PONDEROSA(samples, args=Args()):
 
     pedigree = Pedigree(samples=samples, pedigree_file="pedigree_codes.yaml", tree_file="tree_codes.yaml")
-    pairs = pedigree.find_all_relationships()
+    pairs = pedigree.find_all_relationships(args.training)
 
     # trains the classifiers
     degree_classif, hap_classif, n_classif = trainClassifiers(pairs, args.training)
