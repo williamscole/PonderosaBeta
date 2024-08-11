@@ -645,13 +645,11 @@ def PONDEROSA(samples, args=Args()):
     probs, labels = hap_classif.predict_proba(X=np.array(second_df.apply(lambda x: sorted([h for _,h in x.h.items()], reverse=True), axis=1).values.tolist()),
                                                 ids=second_df[["id1", "id2"]].values)
     
-    print(labels)
-    import pdb; pdb.set_trace()
 
     for (_, row), prob in zip(second_df.iterrows(), probs):
         # get the index of the Phase error class
         classes = list(labels)
-        pe_index = classes.index("Phase error"); del classes[pe_index]
+        pe_index = classes.index("PhaseError"); del classes[pe_index]
 
         # the chance of high Phase error is high; do not update the HS or GPAV probabilities
         if prob[pe_index] < 0.2:
