@@ -644,6 +644,9 @@ def PONDEROSA(samples, args=Args()):
     # get the probabilities from the hap score classifier
     probs, labels = hap_classif.predict_proba(X=np.array(second_df.apply(lambda x: sorted([h for _,h in x.h.items()], reverse=True), axis=1).values.tolist()),
                                                 ids=second_df[["id1", "id2"]].values)
+    
+    print(labels)
+    import pdb; pdb.set_trace()
 
     for (_, row), prob in zip(second_df.iterrows(), probs):
         # get the index of the Phase error class

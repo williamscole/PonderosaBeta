@@ -1087,8 +1087,6 @@ class Pedigree:
             probs = lda.predict_proba(sib_df[["k_ibd1", "k_ibd2"]].values)
             sib_df["predicted"] = [i[fs] > i[hs] for i in probs]
 
-            import pdb; pdb.set_trace()
-
         else:
             print("Not enough putative FS/half-siblings. Please supply a training pickle file!")
 
