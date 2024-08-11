@@ -8,5 +8,5 @@ python3 /share/hennlab/data/genomes/CAAPA_freeze2_PHASED_common_rare/ponderosa/s
     -fam ${wdir}/batwa/allchr.batwa.snps.h3a.maf01.hg19.fam \
     -map ${wdir}/interpolated_maps.caapa_h3a_maf01/newchr1.snps.h3a.maf01.hg19.map \
     -training ${wdir}/batwa/Simulations/ponderosa_simulations/degree_classifier_pop1.pkl \
-    -out ${wdir}/batwa/batwa.PONDEROSAresults_2 \
+    -out ${wdir}/PonderosaBeta/del_batwa.PONDEROSAresults_2 \
     -min_p 0.8
