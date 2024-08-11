@@ -1430,49 +1430,86 @@ def run_phasedibd(input_vcf, input_map, **kwargs):
 
         
 class RemoveRelateds:
+    """
+    Provides various functions for generating lists of unrelated individuals
+    from KING or KING-like IBD1, IBD2 estimates
 
-    def __init__(self):
-        self.seed = np.random.choice(np.arange(20000))
-        np.random.seed = self.seed
+    Attributes:
+        kinG (nx.Graph): graph in which edges between nodes denote the PropIBD of the connecting nodes 
+        king_df (pd.DataFrame): KING .seg file as a pandas dataframe 
+        noise (float): so that the algorithm can explore more of the space, we add Gaussian noise.
+            Here noise is the sd of a 0-mean Gaussian
+        target (float or int): desired number of unrelated individuals. Will stop running the algorithm
+            when the number of unrelateds is >= this number
+        n_iter (int): number of iterations of the self.get_unrelateds function to be run. Will stop running
+            the algorithm when either the target number of met or it has run all the iterations, whichever
+            comes first.
+        seed (int): the seed corresponding to the run with the most individuals
+    """
+    
+    def __init__(self, king,
+                 sample_ids=None,
+                 noise=1.5,
+                 target=np.inf,
+                 max_iter=10,
+                 seed=np.random.choice(np.range(2000))):
+        """
+        Initializes the object by creating the kinship graph
 
-    # takes as input a king file
-    # threshold_func is a func that takes as input PropIBD, IBD1Seg, IBD2Seg, InfType and returns True if the input is considered to be related
-    def king_graph(self, king_file, threshold_func, other_args=[]):
+        Arguments:
+            king (pd.DataFrame or str): either the loaded KING .seg file or a path + file name for the file
+            sample_ids (array-like or str, optional): either a list/array of IDs or a path + file name for a single-column list of IDs.
+                This is necessary if there are individuals who are completely unrelated to everyone in the dataset
+        """
+        if type(king) == str: # If a file is supplied, will load the king file
+            king = pd.read_csv(king,
+                               delim_whitespace=True,
+                               dtype={"ID1": str, "ID2": str})
+            
+        self.kinG = nx.Graph() # Initialize the graph
 
-        if type(king_file) == str:
-            # read in king file
-            king = pd.read_csv(king_file, delim_whitespace = True, dtype = {"ID1": str, "ID2": str})
+        if sample_ids: # sample_ids arg is supplied
+            if type(sample_ids) == str: # Load the ids as a numpy array
+                sample_ids = np.loadtxt(sample_ids, dtype=str)
+            
+            # Add all IDs as nodes to the graph
+            self.kinG.add_nodes_from(sample_ids)
 
-        # we can also load an existing king df
-        else:
-            king = king_file
+        else: # sample_ids arg is not supplied
+            # Add only IDs present in the KING file
+            self.kinG.add_nodes_from(set(king.ID1) | set(king.ID2))
 
-        # create graph structure with the kinship coeff
-        self.kinG = nx.Graph()
-        self.kinG.add_weighted_edges_from(king[["ID1", "ID2", "PropIBD"]].values)
+        # Add the edges (weighted by PropIBD) to the graph
+        self.kinG.add_weighted_edges_from(king[["ID1","ID2","PropIBD"]].values)
+        self.king_df = king
 
-        # build the kinship graph
-        G = nx.Graph()
-        G.add_nodes_from(self.kinG.nodes)
-        king_related = king[king[["PropIBD", "IBD1Seg", "IBD2Seg", "InfType"]].apply(lambda x: threshold_func(*x, *other_args), axis = 1)]
-        G.add_edges_from(king_related[["ID1", "ID2"]].values)
-        import pdb; pdb.set_trace()
-
-        return G
+        self.noise = noise
+        self.target = target
+        self.max_iter = max_iter
+        self.seed = seed
 
     def unrelated_family(self, g):
+        """
+        Returns a list of nodes that are unrelated
+
+        Arguments:
+            g (nx.Graph): a single-component graph in which edges indicate relatedness
+
+        Returns:
+            list: a list of unrelated nodes
+        """
 
         # keep track of the unrelated nodes
         unrelated_nodes = list()
 
-        # dict maps an ID to the number of close relatives
+        # dict maps an ID to the number of edges (ie degree, ie no. of close relatives)
         degree_d = dict(g.degree())
 
         # each iteration removes a node from degree_d so will be executed len(degree_d) times
         while len(degree_d) > 0:
 
             # create function that returns the num of close relatives +- random noise for tie-breakers
-            randmin = lambda x: np.random.normal(degree_d[x] , 1.5)
+            randmin = lambda x: np.random.normal(degree_d[x] , self.noise)
 
             # picks the node with the fewest close relatives
             node1 = min(degree_d, key = randmin)
@@ -1491,61 +1528,93 @@ class RemoveRelateds:
         return unrelated_nodes
 
     def get_unrelateds(self, G):
-        # object to store various components of the run
-        # n_comp is number of distinct families, unrelateds holds the unrelateds, max k holds the highest kinship value of the set
-        run = type('run', (object,), {"n_comp": 0, "unrelateds": []})
+        """
+        Given a graph G in which edges indicate relatedness, computes a greedy-approximated
+        maximum-sized set of unrelated individuals.
 
-        # iterate through each "family" (clusters of relatives entirely unrelated)
+        Arguments:
+            G (nx.Graph): a graph in which edges indicate relatedness
+
+        Returns:
+            run: A custom object with the following Attributes
+                    n_comp (int): no. of connected components in G
+                    unrelateds (list): list of unrelated relatives
+                    max_k (float): maximum PropIBD of all pairs in unrelateds
+                    seed (int): the seed used to generate the run
+        """
+
+        run = type('run', (object,), {"n_comp": 0, "unrelateds": [], "max_k": np.nan}) # init the object
+
+        # Iterate through each "family" (clusters of relatives entirely unrelated)
         for i in nx.connected_components(G):
-            g = G.subgraph(i)
-            run.unrelateds += self.unrelated_family(g)
-            run.n_comp += 1
+            g = G.subgraph(i) # Subgraph of the larger graph
+            run.unrelateds += self.unrelated_family(g) # Add unrelateds of new family
+            run.n_comp += 1 # Add a new family (component)
 
-        # return the run object
-        return run
+        return run # Return the run object
 
-    # run it over multiple iterations using different seeds to get more individuals included
-    # target is the min len of unrelateds for the loop to stop
-    # max_iter is the max num of iterations before it stops
-    def multiple_runs(self, G, target, max_iter = 10):
 
-        # keep track of the runs
-        run_list = []
+    def multiple_runs(self, G):
+        """
+        Given a graph G, runs the self.get_unrelateds functions several times, each with
+        a different seed. Should explore more of the space and return a larger set of 
+        unrelateds than just a single run 
 
-        # only run it max_iter times
-        for i in range(max_iter):
+        Input: A graph in which relatives are connected through edges
 
-            # choose and set new seed
-            seed = np.random.choice(np.arange(20000))
-            np.random.seed = seed
+        Returns:
+            run object: The run object with the most unrelated individuals. Contains attributes such as
+                    unrelateds (list): A list of unrelated individuals
+                    seed (int): The random seed used to generate the list
+                    max_k (float): The PropIBD of the closest related pair in the unrelateds
+                    n_comp (int): The number of distinct, unrelated families
+        """
 
-            # run the unrelateds algorithm
+        run_list = [] # Keep track of the runs
+
+        for i in range(self.max_iter): # Only run for a specified number of iterations
+
+            # Set the numpy seed
+            np.random.seed = self.seed
+
+            # Run the unrelateds algorithm
             run = self.get_unrelateds(G)
-            run.seed = seed
+            run.seed = self.seed # Set the seed of the run obj to the current seed
 
-            # add the new run to run_list
+            # Pick a new seed
+            self.seed = np.random.choice(np.arange(20000))
+
+            # Add the new run to run_list
             run_list.append(run)
 
-            # if the most recent run exceeds our target, stio
-            if len(run.unrelateds) >= target:
-                print(f"Target of {target} relatives found")
+            # If the most recent run exceeds our target, stop the run
+            if len(run.unrelateds) >= self.target:
+                print(f"Target of {self.target} relatives found")
                 break
 
             print(f"Running iteration {i+1}...found a set of {len(run.unrelateds)}")
 
-        # sort by length and get run with longest unrelateds list
+        # Sort by length
         run_list.sort(key = lambda x: len(x.unrelateds), reverse = True)
-        run = run_list[0]
+        run = run_list[0] # Get the longest list of unrelateds
 
-        # set the class seed
+        # Set the class seed
         self.seed = run.seed
 
         return run
 
-
     def write_out(self, run, prefix = "unrelateds"):
+        """
+        For a given run of the algorith, this writes out a .log file that contains information about
+        the run and a .txt file that is a single column containing the IDs of the unrelated individuals.
 
-        # write log file
+        Input:
+            run (run object): A single run object corresponding to the output of self.multiple_runs
+            prefix (str): The path and file prefix for the log and txt file to be written, i.e., will
+                write files [prefix].log and [prefix].txt 
+        """
+
+        # Write log file
         log = open(f"{prefix}.log", "w")
         log.write(f"{datetime.now().strftime('%m/%d/%Y, %H:%M:%S')}\n")
         log.write(f"Random seed: {self.seed}\n\n")
@@ -1554,60 +1623,71 @@ class RemoveRelateds:
         log.write(f"Of these, the max kinship (or kinship equivalent) is {run.max_k}\n")
         log.close()
 
-        # write out unrelateds
+        # Write out unrelateds
         out = open(f"{prefix}.txt", "w")
-        out.write("\n".join(run.unrelateds) + "\n")
+        out.write("\n".join(run.unrelateds))
         out.close()
 
-    def get_unrelated_set(self, G, **kwargs):
-        # run iterations to find the largest set
-        run = self.multiple_runs(G,
-                                 target = kwargs.get("target", np.inf),
-                                 max_iter = kwargs.get("max_iter", 25))
-        
-        run.max_k = max([d["weight"] for _,_,d in self.kinG.subgraph(run.unrelateds).edges(data=True)])
+    def get_related_graph(self,
+                          lda=None,
+                          degree_threshold=None,
+                          related_threshold=None,
+                          output=None):
+        """
+        Generates a graph in which edges between individuals indicate relatedness
 
-        if kwargs.get("prefix", "") != "":
-            self.write_out(run, kwargs["prefix"])
+        Arguments:
+            lda (str or sklearn.discriminant_analysis.LinearDiscriminantAnalysis or pedigree_tools.Classifiers):
+                If str, a path + pickle file to open either an LDA object itself or the pedigree_tools.Classifier (degree)
+            degree_threshold (str): the degree of relatedness for a pair to be considered related; must be used with lda argument
+            related_threshold (function): a function that takes as input KING columns and returns true if the pair is to be considered related.
+                As an example, it could take the argument: lambda cols: cols.InfType in ["MZ/Dup", "PO", "FS", "2nd", "3rd"] would consider
+                individuals who are 2nd degree OR closer related as related
+            output (str): If supplied, will run the unrelateds algorithm and write out the unrelated individuals to [output].txt
 
-        return run
+        Returns:
+            nx.Graph: an undirected graph in which edges indicate relatedness 
+        """
 
-    def get_unrelated_set_lda(self, king_file, path_to_lda, max_degree, **kwargs):
+        g = nx.Graph() # Initialize the graph
+        g.add_nodes_from(self.kinG.nodes) # Add all nodes to the graph
 
-        if os.path.exists(path_to_lda):
-            i = open(path_to_lda, "rb")
-            degree_lda = pkl.load(i)
-        else:
-            degree_lda = path_to_lda.lda
+        tmp_king = self.king_df.copy() # Copy the KING data frame
 
-        degrees = ["4th", "4th+", "3rd", "3rd+", "2nd", "2nd+", "PO", "FS", "1st"]
-        related_degree = degrees[degrees.index(max_degree)+1:]
+        # An lda argument has been supplied and a degree_threshold
+        if lda and degree_threshold:
+            if type(lda) == str: # A path to a pickle file was supplied
+                i = open(lda, "rb")
+                lda = pkl.load(i) # Load pickle file
+            if type(lda) == Classifier: # The loaded LDA is a Classifier object
+                lda = lda.lda # Make lda the actual sklearn LDA object
 
-        king_df = pd.read_csv(king_file, delim_whitespace=True)
+            # Creates a mapping from the string degree of relatedness to an integer
+            degrees = {"4th": 4, "4th+": 3.5, "3rd": 3, "3rd+": 2.5, "2nd": 2, "2nd+": 1.5, "PO": 1, "FS": 1, "1st": 1, "MZ/Dup": 0}
 
-        king_df["predicted"] = degree_lda.predict(king_df[["IBD1Seg", "IBD2Seg"]].values)
+            tmp_king["degree"] = lda.predict(tmp_king[["IBD1Seg", "IBD2Seg"]].values) # Predict the degree of relatedness
+            tmp_king["degree_int"] = tmp_king.degree.apply(lambda x: degrees[x]) # Convert the degree to an integer
 
-        self.kinG = nx.Graph()
-        self.kinG.add_weighted_edges_from(king_df[["ID1","ID2","PropIBD"]].values)
+            # Get an integer representation of the threshold
+            threshold = degrees[degree_threshold]
 
-        G = nx.Graph()
-        G.add_edges_from(king_df[king_df.predicted.isin(related_degree)][["ID1","ID2"]].values)
+            # Creates the threshold function to be applied to the KING df
+            related_threshold = lambda cols: cols.degree_int <= threshold
 
-        self.get_unrelated_set(G, prefix=kwargs.get("prefix", ""), max_iter=kwargs.get("max_iter", 25), target=kwargs.get("target", np.inf))
+        # Apply the relatedness function to the KING df; removes rows between "unrelateds"
+        related_king = tmp_king[tmp_king.apply(related_threshold, axis=1)]
 
-    def king_unrelateds(self, king_file: str, max_k: float):
+        # Add the edges the graph (that has been initialized)
+        g.add_edges_from(related_king[["ID1", "ID2"]].values)
 
-        # create the relatedness network from the king file
-        G = self.king_graph(king_file, lambda propIBD, a, IBD2Seg, c: propIBD > 0.1 or IBD2Seg > 0.03)
+        # If an output is supplied, run multiple runs and write out the longest list of unrelateds
+        if output:
+            run = self.multiple_runs(g) # Get the run with the longest list of unrelateds
+            self.write_out(run, output) # Write out the run
 
-        # run 10 iterations to find the largest set
-        run = self.multiple_runs(G, target = np.inf, max_iter = 10)
+        return g
 
-        # write out the file
-        outfile = open("sim_keep.txt", "w")
-        _ = outfile.write("\n".join(run.unrelateds))
-        
-        print(f"Wrote out {len(run.unrelateds)} IDs to keep to 'sim_keep.txt'")
+
 
 
 def quick_kinship(pair_df):
