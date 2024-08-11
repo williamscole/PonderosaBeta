@@ -1080,6 +1080,13 @@ class Pedigree:
         elif lda:
             i = open(lda, "rb")
             lda = pkl.load(i)
+            i.close()
+
+            tmp = list(lda.classes_)
+            hs, fs = tmp.index("2nd"), tmp.index("FS")
+            probs = lda.predict_proba(sib_df[["k_ibd1", "k_ibd2"]].values)
+            sib_df["predicted"] = [i[fs] > i[hs] for i in probs]
+
             import pdb; pdb.set_trace()
 
         else:
