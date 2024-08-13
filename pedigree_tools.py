@@ -1077,6 +1077,10 @@ class Pedigree:
             # predict whether FS or HS
             sib_df["predicted"] = gmm.predict(sib_df[["k_ibd1", "k_ibd2"]].values.tolist())
 
+        elif sib_df.shape[0] == 0:
+            self.logger.info(f"No putative siblings found.\n")
+            return
+
         elif lda:
             i = open(lda, "rb")
             lda = pkl.load(i)
