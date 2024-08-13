@@ -626,37 +626,39 @@ def PONDEROSA(samples, args=Args()):
     # subset to second degree relatives
     second_df = unknown_df[unknown_df["probs"].apply(lambda x: x.hier.nodes["2nd"]["p_con"] > 0.2)]
 
-    # get the n_ibd segs classifier probabilities
-    probs, labels = n_classif.predict_proba(X=second_df[["ibd_cov", "n"]].values,
-                                            ids=second_df[["id1", "id2"]].values)
-    # add the probabilities to the tree
-    for (_, row), prob in zip(second_df.iterrows(), probs):
-        row["probs"].add_probs(list(zip(labels, prob)), "nsegs")
+    if second_df.shape[0] > 0:
 
-        # for each of these nodes, take the sum of the two children
-        for node in ["GP", "GPAV", "HS"]:
-            # array of the children probabilities
-            child_probs = [row["probs"].hier.nodes[i]["p_con"] for i in row["probs"].hier.successors(node)]
-            # add the probability
-            row["probs"].add_probs(node, p_con=sum(child_probs), method="nsegs")
-
-
-    # get the probabilities from the hap score classifier
-    probs, labels = hap_classif.predict_proba(X=np.array(second_df.apply(lambda x: sorted([h for _,h in x.h.items()], reverse=True), axis=1).values.tolist()),
+        # get the n_ibd segs classifier probabilities
+        probs, labels = n_classif.predict_proba(X=second_df[["ibd_cov", "n"]].values,
                                                 ids=second_df[["id1", "id2"]].values)
-    
+        # add the probabilities to the tree
+        for (_, row), prob in zip(second_df.iterrows(), probs):
+            row["probs"].add_probs(list(zip(labels, prob)), "nsegs")
 
-    for (_, row), prob in zip(second_df.iterrows(), probs):
-        # get the index of the Phase error class
-        classes = list(labels)
-        pe_index = classes.index("PhaseError"); del classes[pe_index]
+            # for each of these nodes, take the sum of the two children
+            for node in ["GP", "GPAV", "HS"]:
+                # array of the children probabilities
+                child_probs = [row["probs"].hier.nodes[i]["p_con"] for i in row["probs"].hier.successors(node)]
+                # add the probability
+                row["probs"].add_probs(node, p_con=sum(child_probs), method="nsegs")
 
-        # the chance of high Phase error is high; do not update the HS or GPAV probabilities
-        if prob[pe_index] < 0.2:
-            row["probs"].add_probs(list(zip(classes, np.delete(prob, pe_index))), "hap")
 
-    # merge the second degree back in with the unknowns
-    unknown_df = pd.concat([unknown_df, second_df]).drop_duplicates(subset=["id1", "id2"], keep="last").reset_index(drop=True)
+        # get the probabilities from the hap score classifier
+        probs, labels = hap_classif.predict_proba(X=np.array(second_df.apply(lambda x: sorted([h for _,h in x.h.items()], reverse=True), axis=1).values.tolist()),
+                                                    ids=second_df[["id1", "id2"]].values)
+        
+
+        for (_, row), prob in zip(second_df.iterrows(), probs):
+            # get the index of the Phase error class
+            classes = list(labels)
+            pe_index = classes.index("PhaseError"); del classes[pe_index]
+
+            # the chance of high Phase error is high; do not update the HS or GPAV probabilities
+            if prob[pe_index] < 0.2:
+                row["probs"].add_probs(list(zip(classes, np.delete(prob, pe_index))), "hap")
+
+        # merge the second degree back in with the unknowns
+        unknown_df = pd.concat([unknown_df, second_df]).drop_duplicates(subset=["id1", "id2"], keep="last").reset_index(drop=True)
 
     samples.edge_subset(unknown_df[["id1", "id2"]].apply(lambda x: tuple(x), axis=1).values, inplace=True)
 
