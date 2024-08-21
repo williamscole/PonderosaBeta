@@ -629,8 +629,9 @@ def PONDEROSA(samples, args=Args()):
     if second_df.shape[0] > 0:
 
         # get the n_ibd segs classifier probabilities
-        probs, labels = n_classif.predict_proba(X=second_df[["ibd_cov", "n"]].values,
+        probs, labels = n_classif.predict_proba(X=second_df[["n", "ibd_cov"]].values,
                                                 ids=second_df[["id1", "id2"]].values)
+
         # add the probabilities to the tree
         for (_, row), prob in zip(second_df.iterrows(), probs):
             row["probs"].add_probs(list(zip(labels, prob)), "nsegs")
