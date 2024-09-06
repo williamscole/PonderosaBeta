@@ -183,6 +183,11 @@ class SampleData:
                 cur_edge_data["n"] = ibd_data.n
                 cur_edge_data["probs"] = hier
 
+                # delete at some point
+                # check to see if parents
+                if ibd_data.ibd1 > 0.75:
+                    hier.set_attrs({"1st": 1, "PO": 1, "FS": 0}, "p")
+
 
                 # # add ibd1 data and initialze probs
                 # self.g.add_edge(id1, id2, ibd1=ibd_data.ibd1,
