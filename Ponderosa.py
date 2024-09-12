@@ -181,12 +181,21 @@ class SampleData:
                 cur_edge_data["h"] = {id1: ibd_data.h1, id2: ibd_data.h2}
                 cur_edge_data["h_error"] = {id1: ibd_data_pe.h1, id2: ibd_data_pe.h2}
                 cur_edge_data["n"] = ibd_data.n
+
+                if ibd_data.ibd1 > 0.75:
+                    # hier.hier.nodes["1st"]["p"] = 1
+                    hier.hier.nodes["PO"]["p"] = 1
+                    hier.hier.nodes["FS"]["p"] = 0
+
                 cur_edge_data["probs"] = hier
 
                 # delete at some point
                 # check to see if parents
-                if ibd_data.ibd1 > 0.75:
-                    hier.set_attrs({"1st": 1, "PO": 1, "FS": 0}, "p")
+                # if ibd_data.ibd1 > 0.75:
+                #     cur_edge_data["probs"].hier.nodes["1st"]["p"] = 1
+                #     cur_edge_data["probs"].hier.nodes["PO"]["p"] = 1
+                #     cur_edge_data["probs"].hier.nodes["FS"]["p"] = 0
+                    # hier.set_attrs({"1st": 1, "PO": 1, "FS": 0}, "p")
 
 
                 # # add ibd1 data and initialze probs
